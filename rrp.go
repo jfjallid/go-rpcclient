@@ -430,7 +430,7 @@ func handleRrp(args *userArgs) (err error) {
 	defer conn.TreeDisconnect(share)
 	f, err := conn.OpenFile(share, msrrp.MSRRPPipe)
 	if err != nil {
-		if err == smb.StatusMap[smb.StatusPipeNotAvailable] {
+		if err == smb.StatusMap[smb.StatusObjectNameNotFound] {
 			err = fmt.Errorf("RemoteRegistry is currently not running")
 		}
 		log.Errorln(err)

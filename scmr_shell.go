@@ -113,7 +113,7 @@ func (self *shell) getScmrHandle() (rpccon *msscmr.RPCCon, err error) {
 		f, err = self.options.c.OpenFile(self.share, msscmr.MSRPCSvcCtlPipe)
 		if err != nil {
 			if err == smb.StatusMap[smb.StatusObjectNameNotFound] {
-				err = fmt.Errorf("Named pipe not available. Is the service runnng?")
+				err = fmt.Errorf("Named pipe not available. Is the service running?")
 			}
 			return
 		}

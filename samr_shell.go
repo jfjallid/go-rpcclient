@@ -191,7 +191,7 @@ func (self *shell) getSamrHandle() (rpccon *mssamr.RPCCon, err error) {
 		f, err = self.options.c.OpenFile(self.share, mssamr.MSRPCSamrPipe)
 		if err != nil {
 			if err == smb.StatusMap[smb.StatusObjectNameNotFound] {
-				err = fmt.Errorf("Named pipe not available. Is the service runnng?")
+				err = fmt.Errorf("Named pipe not available. Is the service running?")
 			}
 			return
 		}

@@ -46,6 +46,7 @@ var helpSamrOptions = `
           --add-member         Add member to group (use --rid) or alias (use --sid)
           --remove-member      Remove member from group (use --user-rid) or alias (use --sid)
           --create-user        Create local user
+          --create-computer    Create a machine account in AD domain (no SPN is added)
           --translate-sid      Convert SID to name of principal
           --lookup-sid         Translate --rid in --local-domain to a SID
           --lookup-rids        Translate --rids to names in domain specified by --local-domain
@@ -218,6 +219,23 @@ func handleSamr(args *userArgs) (err error) {
 	if args.createUser {
 		if args.name == "" {
 			log.Errorln("Must specify a username (--name) for the new account")
+			return
+		}
+		if args.userPassword == "" {
+			fmt.Printf("Enter password for new account: ")
+			passBytes, err = term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Println()
+			if err != nil {
+				log.Errorln(err)
+				return
+			}
+			args.userPassword = string(passBytes)
+		}
+		numActions++
+	}
+	if args.createComputer {
+		if args.name == "" {
+			log.Errorln("Must specify a machine account name (--name) for the new account")
 			return
 		}
 		if args.userPassword == "" {
@@ -482,6 +500,56 @@ func handleSamr(args *userArgs) (err error) {
 		}
 		fmt.Printf("Created user %s with SID: %s\n", args.name, sid)
 		return
+	} else if args.createComputer {
+		var domainName string
+		if args.localDomain != "" {
+			domainName = args.localDomain
+		} else if args.netbiosComputerName != "" {
+			domainName = args.netbiosComputerName
+		} else {
+			domainName, err = getSamrNetbiosDomain(rpccon, handle)
+			if err != nil {
+				log.Errorln(err)
+				return
+			}
+		}
+		var domainId *msdtyp.SID
+		domainId, err = rpccon.SamrLookupDomain(handle, domainName)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+		var domainHandle *mssamr.SamrHandle
+		domainHandle, err = rpccon.SamrOpenDomain(handle, 0, domainId)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+		defer rpccon.SamrCloseHandle(domainHandle)
+		var accountHandle *mssamr.SamrHandle
+		var accountRid uint32
+		if !strings.HasSuffix(args.name, "$") {
+			args.name += "$"
+		}
+		accountHandle, accountRid, err = rpccon.SamrCreateUser2InDomain(domainHandle, args.name, mssamr.UserWorkstationTrustAccount, 0)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+		defer rpccon.SamrCloseHandle(accountHandle)
+		accountSid := fmt.Sprintf("%s-%d", domainId.ToString(), accountRid)
+		fmt.Printf("Created computer account %s with SID: %s\n", args.name, accountSid)
+		input := &mssamr.SamrUserInfoInput{
+			NewPassword:        args.userPassword,
+			UserAccountControl: mssamr.UserWorkstationTrustAccount | mssamr.UserDontExpirePassword,
+		}
+		err = rpccon.SamrSetUserInfo2(accountHandle, input)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+		fmt.Printf("Password updated for %s\n", args.name)
+		return
 	} else if args.addLocalAdmin {
 		err = rpccon.AddLocalAdmin(args.sid.s)
 		if err != nil {
@@ -728,20 +796,11 @@ func handleSamr(args *userArgs) (err error) {
 		} else if args.netbiosComputerName != "" {
 			domainName = args.netbiosComputerName
 		} else {
-			var domains []string
-			domains, err = rpccon.SamrEnumDomains(handle)
-			var otherDomains []string
-			for _, domain := range domains {
-				if domain != "Builtin" {
-					otherDomains = append(otherDomains, domain)
-				}
-			}
-			if len(otherDomains) != 1 {
-				err = fmt.Errorf("Failed to automatically identity the Netbios domain. Select the correct domain and use it as an argument from the available domains: %v\n", domains)
+			domainName, err = getSamrNetbiosDomain(rpccon, handle)
+			if err != nil {
 				log.Errorln(err)
 				return
 			}
-			domainName = otherDomains[0]
 		}
 	}
 

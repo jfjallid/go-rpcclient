@@ -42,7 +42,7 @@ import (
 )
 
 var log = golog.Get("")
-var release string = "0.1.0"
+var release string = "0.2.0"
 var flags *flag.FlagSet
 
 var helpMsg = `
@@ -53,6 +53,8 @@ var helpMsg = `
           --samr                Interact with the Security Account Manager
           --wkst                Interact with the Workstation Service
           --srvs                Interact with the Server Service
+          --scmr                Interact with the Service Control Manager
+          --rrp                 Interact with the Remote Registry
       -i, --interactive         Launch interactive mode
       ` + helpConnectionOptions + `
 `
@@ -88,12 +90,12 @@ var helpConnectionOptions = `
 
 // Custom types to help with argument parsing and validation
 type ridList []uint32
-type nameList []string
-type rightsList []string
+type stringList []string
 type SID struct {
 	s string
 	v *msdtyp.SID
 }
+type binaryArg []byte
 
 func (n *ridList) String() string {
 	return fmt.Sprintf("%v", *n)
@@ -118,35 +120,16 @@ func (n *ridList) Set(value string) error {
 	return nil
 }
 
-func (n *nameList) String() string {
+func (n *stringList) String() string {
 	return fmt.Sprintf("%v", *n)
 }
 
-func (n *nameList) Set(value string) error {
+func (n *stringList) Set(value string) error {
 	parts := strings.Split(value, ",")
 	for i, _ := range parts {
 		str := strings.TrimSpace(parts[i])
 		if strings.Contains(str, " ") {
-			return fmt.Errorf("names should be separated by comma, not by space.")
-		}
-		if str != "" {
-			*n = append(*n, str)
-		}
-	}
-
-	return nil
-}
-
-func (n *rightsList) String() string {
-	return fmt.Sprintf("%v", *n)
-}
-
-func (n *rightsList) Set(value string) error {
-	parts := strings.Split(value, ",")
-	for i, _ := range parts {
-		str := strings.TrimSpace(parts[i])
-		if strings.Contains(str, " ") {
-			return fmt.Errorf("Rights should be separated by comma, not by space.")
+			return fmt.Errorf("List of strings should be separated by comma, not by space.")
 		}
 		if str != "" {
 			*n = append(*n, str)
@@ -170,6 +153,20 @@ func (n *SID) Set(value string) error {
 
 func (n *SID) Get() *msdtyp.SID {
 	return n.v
+}
+
+func (n *binaryArg) String() string {
+	return hex.EncodeToString(*n)
+}
+
+func (n *binaryArg) Set(value string) error {
+	value = strings.TrimPrefix(value, "0x")
+	val, err := hex.DecodeString(value)
+	if err != nil {
+		return fmt.Errorf("Invalid hex string for argument")
+	}
+	*n = val
+	return nil
 }
 
 func isFlagSet(name string) bool {
@@ -233,6 +230,8 @@ type generalArgs struct {
 	lsad    bool
 	srvs    bool
 	wkst    bool
+	scmr    bool
+	rrp     bool
 }
 
 type userArgs struct {
@@ -255,6 +254,7 @@ type userArgs struct {
 	removeFromLocalGroup bool
 	addLocalAdmin        bool
 	createUser           bool
+	createComputer       bool
 	deleteUser           bool
 	queryUser            bool
 	resetUserPassword    bool
@@ -270,9 +270,31 @@ type userArgs struct {
 	// enumSessions
 	enumShares    bool
 	getServerInfo bool
+	// SCMR actions
+	enumServices        bool
+	enumServiceConfigs  bool
+	getServiceConfig    bool
+	getServiceStatus    bool
+	changeServiceConfig bool
+	startService        bool
+	controlService      bool
+	createService       bool
+	deleteService       bool
+	// RRP actions
+	getKeyValue    bool
+	setKeyValue    bool
+	deleteValue    bool
+	deleteKey      bool
+	createKey      bool
+	saveKey        bool
+	enumKeys       bool
+	enumValues     bool
+	getKeyInfo     bool
+	getKeySecurity bool
+	setKeySecurity bool
 	// arguments
 	sid                 SID
-	rights              rightsList
+	rights              stringList
 	systemRights        bool
 	rid                 uint64
 	userRid             uint64
@@ -286,7 +308,24 @@ type userArgs struct {
 	limit               int
 	oldNTHash           string
 	newPass             string
-	names               nameList
+	names               stringList
+	serviceState        uint64
+	serviceType         uint64
+	serviceStartType    uint64
+	serviceErrorControl uint64
+	arguments           stringList
+	serviceAction       string
+	exePath             string
+	startName           string
+	displayName         string
+	key                 string
+	stringValue         string
+	dwordValue          uint64
+	qwordValue          uint64
+	binaryValue         binaryArg
+	remotePath          string
+	ownerSid            SID
+	debugPrivilege      bool
 }
 
 func addConnectionArgs(flagSet *flag.FlagSet, argv *userArgs) {
@@ -334,6 +373,7 @@ func addSamrArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.BoolVar(&argv.listGroupMembers, "list-members", false, "")
 	flagSet.BoolVar(&argv.addLocalAdmin, "make-admin", false, "")
 	flagSet.BoolVar(&argv.createUser, "create-user", false, "")
+	flagSet.BoolVar(&argv.createComputer, "create-computer", false, "")
 	flagSet.BoolVar(&argv.changeUserPassword, "change-password", false, "")
 	flagSet.BoolVar(&argv.resetUserPassword, "reset-password", false, "")
 	flagSet.BoolVar(&argv.listGroups, "list-groups", false, "")
@@ -379,6 +419,51 @@ func addSrvsArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.IntVar(&argv.level, "level", 0, "")
 }
 
+func addScmrArgs(flagSet *flag.FlagSet, argv *userArgs) {
+	flagSet.BoolVar(&argv.enumServices, "enum-services", false, "")
+	flagSet.BoolVar(&argv.enumServiceConfigs, "enum-service-configs", false, "")
+	flagSet.BoolVar(&argv.getServiceConfig, "get-service-config", false, "")
+	flagSet.BoolVar(&argv.getServiceStatus, "get-service-status", false, "")
+	flagSet.BoolVar(&argv.changeServiceConfig, "change-service-config", false, "")
+	flagSet.BoolVar(&argv.startService, "start-service", false, "")
+	flagSet.BoolVar(&argv.controlService, "control-service", false, "")
+	flagSet.BoolVar(&argv.createService, "create-service", false, "")
+	flagSet.BoolVar(&argv.deleteService, "delete-service", false, "")
+	flagSet.Uint64Var(&argv.serviceType, "service-type", 0x30, "")
+	flagSet.Uint64Var(&argv.serviceStartType, "start-type", 0x3, "")
+	flagSet.Uint64Var(&argv.serviceErrorControl, "error-control", 0x1, "")
+	flagSet.Uint64Var(&argv.serviceState, "service-state", 0x3, "")
+	flagSet.StringVar(&argv.name, "name", "", "")
+	flagSet.StringVar(&argv.serviceAction, "action", "", "")
+	flagSet.Var(&argv.arguments, "args", "")
+	flagSet.StringVar(&argv.exePath, "exe-path", "", "")
+	flagSet.StringVar(&argv.startName, "start-name", "", "")
+	flagSet.StringVar(&argv.userPassword, "start-pass", "", "")
+	flagSet.StringVar(&argv.displayName, "display-name", "", "")
+}
+
+func addRrpArgs(flagSet *flag.FlagSet, argv *userArgs) {
+	flagSet.BoolVar(&argv.getKeyValue, "get-value", false, "")
+	flagSet.BoolVar(&argv.setKeyValue, "set-value", false, "")
+	flagSet.BoolVar(&argv.deleteValue, "delete-value", false, "")
+	flagSet.BoolVar(&argv.deleteKey, "delete-key", false, "")
+	flagSet.BoolVar(&argv.createKey, "create-key", false, "")
+	flagSet.BoolVar(&argv.saveKey, "save-key", false, "")
+	flagSet.BoolVar(&argv.enumKeys, "enum-keys", false, "")
+	flagSet.BoolVar(&argv.enumValues, "enum-values", false, "")
+	flagSet.BoolVar(&argv.getKeyInfo, "get-key-info", false, "")
+	flagSet.BoolVar(&argv.getKeySecurity, "get-key-security", false, "")
+	flagSet.StringVar(&argv.name, "name", "", "")
+	flagSet.StringVar(&argv.key, "key", "", "")
+	flagSet.StringVar(&argv.stringValue, "string-val", "", "")
+	flagSet.Uint64Var(&argv.dwordValue, "dword-val", 0, "")
+	flagSet.Uint64Var(&argv.qwordValue, "qword-val", 0, "")
+	flagSet.Var(&argv.binaryValue, "binary-val", "")
+	flagSet.StringVar(&argv.remotePath, "remote-path", "", "")
+	flagSet.Var(&argv.ownerSid, "owner", "")
+	flagSet.BoolVar(&argv.debugPrivilege, "use-debug-privilege", false, "")
+}
+
 func handleArgs() (action byte, argv *userArgs, err error) {
 	flags = flag.NewFlagSet("", flag.ExitOnError)
 	flags.Usage = func() {
@@ -390,6 +475,8 @@ func handleArgs() (action byte, argv *userArgs, err error) {
 	flags.BoolVar(&argv.lsad, "lsad", false, "")
 	flags.BoolVar(&argv.srvs, "srvs", false, "")
 	flags.BoolVar(&argv.wkst, "wkst", false, "")
+	flags.BoolVar(&argv.scmr, "scmr", false, "")
+	flags.BoolVar(&argv.rrp, "rrp", false, "")
 	flags.BoolVar(&argv.connArgs.interactive, "i", false, "")
 	flags.BoolVar(&argv.connArgs.interactive, "interactive", false, "")
 	flags.BoolVar(&argv.version, "v", false, "")
@@ -420,6 +507,12 @@ func handleArgs() (action byte, argv *userArgs, err error) {
 		numAction++
 	}
 	if argv.wkst {
+		numAction++
+	}
+	if argv.scmr {
+		numAction++
+	}
+	if argv.rrp {
 		numAction++
 	}
 	if argv.interactive {
@@ -459,6 +552,20 @@ func handleArgs() (action byte, argv *userArgs, err error) {
 		}
 		addSrvsArgs(flags, argv)
 		action = 5
+	} else if argv.scmr {
+		flags.Usage = func() {
+			fmt.Println(helpScmrOptions)
+			os.Exit(0)
+		}
+		addScmrArgs(flags, argv)
+		action = 6
+	} else if argv.rrp {
+		flags.Usage = func() {
+			fmt.Println(helpRRPOptions)
+			os.Exit(0)
+		}
+		addRrpArgs(flags, argv)
+		action = 7
 	}
 
 	addConnectionArgs(flags, argv)
@@ -621,6 +728,8 @@ func main() {
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssamr", "mssamr", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mswkst", "mswkst", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssrvs", "mssrvs", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msscmr", "msscmr", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		log.SetFlags(golog.LstdFlags | golog.Lshortfile)
 		log.SetLogLevel(golog.LevelDebug)
@@ -634,6 +743,8 @@ func main() {
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssamr", "mssamr", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mswkst", "mswkst", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssrvs", "mssrvs", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msscmr", "msscmr", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		log.SetLogLevel(golog.LevelInfo)
 	} else {
@@ -646,6 +757,8 @@ func main() {
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssamr", "mssamr", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mswkst", "mswkst", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssrvs", "mssrvs", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msscmr", "msscmr", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 	}
 
@@ -712,6 +825,18 @@ func main() {
 		}
 	case 5:
 		err = handleSrvs(args)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+	case 6:
+		err = handleScmr(args)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+	case 7:
+		err = handleRrp(args)
 		if err != nil {
 			log.Errorln(err)
 			return

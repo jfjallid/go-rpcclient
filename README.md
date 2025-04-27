@@ -13,6 +13,8 @@ Usage: ./go-rpcclient <service> [options]
       --samr                Interact with the Security Account Manager
       --wkst                Interact with the Workstation Service
       --srvs                Interact with the Server Service
+      --scmr                Interact with the Service Control Manager
+      --rrp                 Interact with the Remote Registry
   -i, --interactive         Launch interactive mode
   
 General options:
@@ -99,6 +101,7 @@ Action:
       --add-member         Add member to group (use --rid) or alias (use --sid)
       --remove-member      Remove member from group (use --user-rid) or alias (use --sid)
       --create-user        Create local user
+      --create-computer    Create a machine account in AD domain (no SPN is added)
       --translate-sid      Convert SID to name of principal
       --lookup-sid         Translate --rid in --local-domain to a SID
       --lookup-rids        Translate --rids to names in domain specified by --local-domain
@@ -108,7 +111,7 @@ Action:
       --reset-password     Reset/force change password of user
       --make-admin         Add user to local administrators group
       --delete-user        Delete local user specified by --user-rid
-      --query-user         Query local user specified by --user-rid
+      --query-user         Query local user specified by --user-rid or --name
 
 SAMR options:
       --sid      <SID>      Target SID of format "S-1-5-...
@@ -117,7 +120,7 @@ SAMR options:
       --rids     <LIST>     Comma-separated list of RIDs to lookup in specified domain
       --local-domain <name> Samr domain name to target. Typically "Builtin" or NetBios name of machine
                             Changes the domain for the action from the default for most actions
-      --name <string>       Username of local account to create
+      --name <string>       Username of local account to create or query
       --names <LIST>        Comma-separated list of samAccountNames to lookup in specified domain
       --user-pass <string>  Password for --create-user or current password for --change-password.
                             Mutually exclusive with --old-hash
@@ -126,6 +129,70 @@ SAMR options:
       --limit <int>         Indication of how many users return max
       --old-hash <hex>      Current NT Hash which is used with --change-password
       --new-pass <string>   New password for --change-password. Skip parameter to trigger prompt.
+```
+
+### SCMR specific usage
+```
+Usage: ./go-rpcclient --scmr [options] <action>
+...
+Action:
+      --enum-services         List services of specified type and states
+      --enum-service-configs  List configs of services of specified type and states
+      --get-service-config    Retrieve service config
+      --get-service-status    Check status of service
+      --change-service-config Change config of a service
+      --start-service         Start a service specified by --name with --args
+      --control-service       Change state of service
+      --create-service        Create new service (default type: 0x10, startType: 0x3,
+                              error: 0x0, startName: LocalSystem, displayName: service name)
+      --delete-service        Delete service
+
+SCMR options:
+      --service-type <int>    Type of service. One or a combination of:
+                              kernel_driver: 0x1, file_system_driver: 0x2
+                              win32_own_process: 0x10, win32_share_process: 0x20
+      --service-status <int>  Service state. (default 0x3) Active 0x1, Inactive 0x2, All 0x3
+      --name <string>         Name of service to query, change, create or delete
+      --args <Strings>        Comma-separated list of start arguments for service
+      --action <action>       Service control action (stop, pause, continue)
+      --start-type: <int>     Service start type: BootStart 0x0, SystemStart 0x1,
+                              AutoStart 0x2, DemandStart 0x3, Disabled 0x4
+      --start-name <string>   Username to run service as. (default LocalSystem)
+      --start-pass <string>   Password of user specified by --start-name
+      --display-name <string> Service display name
+      --error-control <int>   Service error control (default 0x1: ErrorNormal)
+      --exe-path <string>     Absolute path to service binary
+```
+
+### RRP specific usage
+```
+Usage: ./go-rpcclient --rrp [options] <action>
+...
+Action:
+      --get-value        Retrive registry value --name for --key
+      --set-value        Set or create registry value --name for --key
+      --delete-value     Delete registry value --name for --key
+      --enum-keys        List subkey names for --key
+      --enum-values      List value names for --key
+      --create-key       Create new registry key specified with --key
+      --delete-key       Delete registry key specified with --key
+      --get-key-info     Retrieve key info
+      --get-key-security Retrieve key security information
+      --save-key         Save registry key and subkeys to disk
+
+RRP options:
+      --name <string>        Name of registry key value. Skip to target default value
+      --key <path>           Registry path to key beginning with Hive
+                             e.g., "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+      --remote-path <path>   Absolute path on target where to store saved registry key.
+                             If no filename is provided at the end, a random name will be used
+      --owner-sid <SID>      SID of security principal that should own the registry key dump
+      --string-val <string>  Used with --set-value
+      --dword-val <uint32>   Used with --set-value
+      --qword-val <uint64>   Used with --set-value
+      --binary-val <hex>     Used with --set-value. Hex string without leading 0x
+      --use-debug-privilege  Indicate that SeBackupPrivilege is held.
+                             Required to retrieve SACL entries with --get-key-security
 ```
 
 ## Examples

@@ -62,6 +62,7 @@ var helpScmrOptions = `
           --display-name <string> Service display name
           --error-control <int>   Service error control (default 0x1: ErrorNormal)
           --exe-path <string>     Absolute path to service binary
+          --start                 Start a service after creating it (default false)
 `
 
 func handleScmr(args *userArgs) (err error) {
@@ -313,13 +314,21 @@ func handleScmr(args *userArgs) (err error) {
 		fmt.Println("Successfully changed service config")
 		return
 	} else if args.createService {
-		fmt.Printf("Trying to create service with a name of %s\n", args.name)
-		err = rpccon.CreateService(args.name, uint32(args.serviceType), uint32(args.serviceStartType), uint32(args.serviceErrorControl), args.exePath, args.startName, args.userPassword, args.displayName, false)
+		statusMsg := "Trying to create"
+		if args.createAndStart {
+			statusMsg += " and start"
+		}
+		statusMsg += " service with a name of " + args.name
+		fmt.Println(statusMsg)
+		err = rpccon.CreateService(args.name, uint32(args.serviceType), uint32(args.serviceStartType), uint32(args.serviceErrorControl), args.exePath, args.startName, args.userPassword, args.displayName, args.createAndStart)
 		if err != nil {
 			log.Errorln(err)
 			return
 		}
 		fmt.Println("Successfully created the service")
+		if args.createAndStart {
+			fmt.Println("Service started!")
+		}
 		return
 	} else if args.deleteService {
 		err = rpccon.DeleteService(args.name)

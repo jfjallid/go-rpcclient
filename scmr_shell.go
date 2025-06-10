@@ -634,16 +634,20 @@ func scmrCreateServiceFunc(self *shell, argArr interface{}) {
 		self.printf("Error getting service account password: %s\n", err)
 		return
 	}
+	startService := self.getConfirmation("Start service after creation")
 
 	if self.verbose {
 		self.printf("Trying to create a service with name: %q, type: 0x%x, startType: 0x%x, errorCtl: 0x%x, startName: %q, displayName: %q, and a binPath: %s\n")
 	}
-	err = rpccon.CreateService(name, svcType, svcStartType, svcErrorControl, svcExePath, svcStartName, svcUserPass, svcDisplayName, false)
+	err = rpccon.CreateService(name, svcType, svcStartType, svcErrorControl, svcExePath, svcStartName, svcUserPass, svcDisplayName, startService)
 	if err != nil {
 		self.println(err)
 		return
 	}
 	self.println("Successfully created the service")
+	if startService {
+		self.println("Service started!")
+	}
 }
 
 func scmrDeleteServiceFunc(self *shell, argArr interface{}) {

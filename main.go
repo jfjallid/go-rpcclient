@@ -22,9 +22,11 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -42,7 +44,7 @@ import (
 )
 
 var log = golog.Get("")
-var release string = "0.2.0"
+var release string = "0.2.1"
 var flags *flag.FlagSet
 
 var helpMsg = `
@@ -60,32 +62,34 @@ var helpMsg = `
 `
 var helpConnectionOptions = `
     General options:
-          --host <ip/hostname>  Hostname or ip address of remote server. Must be hostname when using Kerberos
-      -P, --port [port]         SMB Port (default 445)
-      -d, --domain [name/fqdn]  Domain name to use for login
-      -u, --user   [string]     Username. Not required for Kerberos auth
-      -p, --pass   [string]     Password. Prompted if not specified
-      -n, --no-pass             Disable password prompt and send no credentials
-          --hash   [hex]        Hex encoded NT Hash for user password
-          --local               Authenticate as a local user instead of domain user
-          --null                Attempt null session authentication
-      -k, --kerberos            Use Kerberos authentication. (KRB5CCNAME will be checked on Linux)
-          --dc-ip     [ip]      Optionally specify ip of KDC when using Kerberos authentication
-          --target-ip [ip]      Optionally specify ip of target when using Kerberos authentication
-          --aes-key   [hex]     Use a hex encoded AES128/256 key for Kerberos authentication
-      -t, --timeout   [int]     Dial timeout in seconds (default 5)
-          --relay               Start an SMB listener that will relay incoming
-                                NTLM authentications to the remote server and
-                                use that connection. NOTE that this forces SMB 2.1
-                                without encryption.
-          --relay-port [port]   Listening port for relay (default 445)
-          --socks-host [target] Establish connection via a SOCKS5 proxy server
-          --socks-port [port]   SOCKS5 proxy port (default 1080)
-          --noenc               Disable smb encryption
-          --smb2                Force smb 2.1
-          --debug               Enable debug logging
-          --verbose             Enable verbose logging
-      -v, --version             Show version
+          --host <ip/hostname>   Hostname or ip address of remote server. Must be hostname when using Kerberos
+      -P, --port <port>          SMB Port (default 445)
+      -d, --domain <name/fqdn>   Domain name to use for login
+      -u, --user   <string>      Username. Not required for Kerberos auth
+      -p, --pass   <string>      Password. Prompted if not specified
+      -n, --no-pass              Disable password prompt and send no credentials
+          --hash   <hex>         Hex encoded NT Hash for user password
+          --local                Authenticate as a local user instead of domain user
+          --null                 Attempt null session authentication
+      -k, --kerberos             Use Kerberos authentication. (KRB5CCNAME will be checked on Linux)
+          --dc-ip     <ip>       Optionally specify ip of KDC when using Kerberos authentication
+          --target-ip <ip>       Optionally specify ip of target when using Kerberos authentication
+          --aes-key   <hex>      Use a hex encoded AES128/256 key for Kerberos authentication
+          --dns-host <ip[:port]> Override system's default DNS resolver
+          --dns-tcp              Force DNS lookups over TCP. Default true when using --socks-host
+      -t, --timeout <duration>   Dial timeout specified in 5s, 1m, 10m format (default 5s)
+          --relay                Start an SMB listener that will relay incoming
+                                 NTLM authentications to the remote server and
+                                 use that connection. NOTE that this forces SMB 2.1
+                                 without encryption.
+          --relay-port <port>    Listening port for relay (default 445)
+          --socks-host <target>  Establish connection via a SOCKS5 proxy server
+          --socks-port <port>    SOCKS5 proxy port (default 1080)
+          --noenc                Disable smb encryption
+          --smb2                 Force smb 2.1
+          --debug                Enable debug logging
+          --verbose              Enable verbose logging
+      -v, --version              Show version
 `
 
 // Custom types to help with argument parsing and validation
@@ -203,12 +207,13 @@ type connArgs struct {
 	password    string
 	hash        string
 	domain      string
-	socksIP     string
+	socksHost   string
 	targetIP    string
 	dcIP        string
 	aesKey      string
+	dnsHost     string
 	port        int
-	dialTimeout int
+	dialTimeout time.Duration
 	socksPort   int
 	relayPort   int
 	noEnc       bool
@@ -219,6 +224,7 @@ type connArgs struct {
 	noPass      bool
 	kerberos    bool
 	interactive bool
+	dnsTCP      bool
 	opts        *localOptions
 }
 
@@ -326,6 +332,7 @@ type userArgs struct {
 	remotePath          string
 	ownerSid            SID
 	debugPrivilege      bool
+	createAndStart      bool
 }
 
 func addConnectionArgs(flagSet *flag.FlagSet, argv *userArgs) {
@@ -344,12 +351,12 @@ func addConnectionArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.BoolVar(&argv.noEnc, "noenc", false, "")
 	flagSet.BoolVar(&argv.forceSMB2, "smb2", false, "")
 	flagSet.BoolVar(&argv.localUser, "local", false, "")
-	flagSet.IntVar(&argv.dialTimeout, "t", 5, "")
-	flagSet.IntVar(&argv.dialTimeout, "timeout", 5, "")
+	flagSet.DurationVar(&argv.dialTimeout, "t", time.Second*5, "")
+	flagSet.DurationVar(&argv.dialTimeout, "timeout", time.Second*5, "")
 	flagSet.BoolVar(&argv.nullSession, "null", false, "")
 	flagSet.BoolVar(&argv.relay, "relay", false, "")
 	flagSet.IntVar(&argv.relayPort, "relay-port", 445, "")
-	flagSet.StringVar(&argv.socksIP, "socks-host", "", "")
+	flagSet.StringVar(&argv.socksHost, "socks-host", "", "")
 	flagSet.IntVar(&argv.socksPort, "socks-port", 1080, "")
 	flagSet.BoolVar(&argv.noPass, "no-pass", false, "")
 	flagSet.BoolVar(&argv.noPass, "n", false, "")
@@ -358,6 +365,9 @@ func addConnectionArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.StringVar(&argv.targetIP, "target-ip", "", "")
 	flagSet.StringVar(&argv.dcIP, "dc-ip", "", "")
 	flagSet.StringVar(&argv.aesKey, "aes-key", "", "")
+	flagSet.StringVar(&argv.dnsHost, "dns-host", "", "")
+	flagSet.BoolVar(&argv.dnsTCP, "dns-tcp", false, "")
+
 }
 
 func addSamrArgs(flagSet *flag.FlagSet, argv *userArgs) {
@@ -440,6 +450,7 @@ func addScmrArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.StringVar(&argv.startName, "start-name", "", "")
 	flagSet.StringVar(&argv.userPassword, "start-pass", "", "")
 	flagSet.StringVar(&argv.displayName, "display-name", "", "")
+	flagSet.BoolVar(&argv.createAndStart, "start", false, "")
 }
 
 func addRrpArgs(flagSet *flag.FlagSet, argv *userArgs) {
@@ -581,6 +592,50 @@ func handleArgs() (action byte, argv *userArgs, err error) {
 func makeConnection(args *connArgs) (err error) {
 	var hashBytes []byte
 	var aesKeyBytes []byte
+	var p uint64
+	// Validate format
+	if isFlagSet("dns-host") {
+		parts := strings.Split(args.dnsHost, ":")
+		if len(parts) < 2 {
+			if args.dnsHost != "" {
+				args.dnsHost += ":53"
+				parts = append(parts, "53")
+				log.Infoln("No port number specified for --dns-host so assuming port 53")
+			} else {
+				fmt.Println("Invalid --dns-host")
+				flag.Usage()
+				return
+			}
+		}
+		ip := net.ParseIP(parts[0])
+		if ip == nil {
+			fmt.Println("Invalid --dns-host. Not a valid ip host address")
+			flag.Usage()
+			return
+		}
+		p, err = strconv.ParseUint(parts[1], 10, 32)
+		if err != nil {
+			fmt.Printf("Invalid --dns-host. Failed to parse port: %s\n", err)
+			return
+		}
+		if p < 1 {
+			fmt.Println("Invalid --dns-host port number")
+			flag.Usage()
+			return
+		}
+	}
+
+	if args.dialTimeout < time.Second {
+		err = fmt.Errorf("Valid value for the timeout is >= 1 seconds")
+		return
+	}
+
+	if args.socksHost != "" && args.socksPort < 1 {
+		fmt.Println("Invalid --socks-port")
+		flag.Usage()
+		return
+	}
+
 	if args.hash != "" {
 		hashBytes, err = hex.DecodeString(args.hash)
 		if err != nil {
@@ -626,6 +681,22 @@ func makeConnection(args *connArgs) (err error) {
 		}
 	}
 
+	if args.dnsHost != "" {
+		protocol := "udp"
+		if args.dnsTCP {
+			protocol = "tcp"
+		}
+		net.DefaultResolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				d := net.Dialer{
+					Timeout: args.dialTimeout,
+				}
+				return d.DialContext(ctx, protocol, args.dnsHost)
+			},
+		}
+	}
+
 	args.opts = &localOptions{}
 	smbOptions := smb.Options{
 		Host:                  args.targetIP,
@@ -636,6 +707,16 @@ func makeConnection(args *connArgs) (err error) {
 	}
 	args.opts.smbOptions = &smbOptions
 
+	if args.socksHost != "" {
+		var dialSocksProxy proxy.Dialer
+		dialSocksProxy, err = proxy.SOCKS5("tcp", fmt.Sprintf("%s:%d", args.socksHost, args.socksPort), nil, proxy.Direct)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+		smbOptions.ProxyDialer = dialSocksProxy
+	}
+
 	if !args.kerberos && (hashBytes == nil) && (aesKeyBytes == nil) && (args.password == "") && !args.nullSession && args.interactive {
 		// Skip login for now
 		smbOptions.ManualLogin = true
@@ -643,13 +724,18 @@ func makeConnection(args *connArgs) (err error) {
 
 	if args.kerberos {
 		smbOptions.Initiator = &spnego.KRB5Initiator{
-			User:     args.username,
-			Password: args.password,
-			Domain:   args.domain,
-			Hash:     hashBytes,
-			AESKey:   aesKeyBytes,
-			SPN:      "cifs/" + args.host,
-			DCIP:     args.dcIP,
+			User:        args.username,
+			Password:    args.password,
+			Domain:      args.domain,
+			Hash:        hashBytes,
+			AESKey:      aesKeyBytes,
+			SPN:         "cifs/" + args.host,
+			DCIP:        args.dcIP,
+			DialTimout:  args.dialTimeout,
+			ProxyDialer: smbOptions.ProxyDialer,
+			DnsHost:     args.dnsHost,
+			DnsTCP:      args.dnsTCP,
+			Host:        args.host,
 		}
 	} else {
 		smbOptions.Initiator = &spnego.NTLMInitiator{
@@ -662,24 +748,8 @@ func makeConnection(args *connArgs) (err error) {
 		}
 	}
 
-	// Only if not using SOCKS
-	if args.socksIP == "" {
-		smbOptions.DialTimeout, err = time.ParseDuration(fmt.Sprintf("%ds", args.dialTimeout))
-		if err != nil {
-			log.Errorln(err)
-			return
-		}
-	}
-
-	if args.socksIP != "" {
-		var dialSocksProxy proxy.Dialer
-		dialSocksProxy, err = proxy.SOCKS5("tcp", fmt.Sprintf("%s:%d", args.socksIP, args.socksPort), nil, proxy.Direct)
-		if err != nil {
-			log.Errorln(err)
-			return
-		}
-		smbOptions.ProxyDialer = dialSocksProxy
-	}
+	// Set DialTimeout for go-smb
+	smbOptions.DialTimeout = args.dialTimeout
 
 	if args.relay {
 		smbOptions.RelayPort = args.relayPort
@@ -718,48 +788,50 @@ func main() {
 
 	action, args, _ := handleArgs()
 
-	if args.debug {
-		golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc", "dcerpc", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/msdtyp", "msdtyp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mslsad", "mslsad", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssamr", "mssamr", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mswkst", "mswkst", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssrvs", "mssrvs", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msscmr", "msscmr", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		log.SetFlags(golog.LstdFlags | golog.Lshortfile)
-		log.SetLogLevel(golog.LevelDebug)
-	} else if args.verbose {
-		golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc", "dcerpc", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/msdtyp", "msdtyp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mslsad", "mslsad", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssamr", "mssamr", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mswkst", "mswkst", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssrvs", "mssrvs", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msscmr", "msscmr", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		log.SetLogLevel(golog.LevelInfo)
-	} else {
-		golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc", "dcerpc", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/msdtyp", "msdtyp", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mslsad", "mslsad", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssamr", "mssamr", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mswkst", "mswkst", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssrvs", "mssrvs", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msscmr", "msscmr", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+	if !args.interactive {
+		if args.debug {
+			golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc", "dcerpc", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/msdtyp", "msdtyp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mslsad", "mslsad", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssamr", "mssamr", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mswkst", "mswkst", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssrvs", "mssrvs", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msscmr", "msscmr", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			log.SetFlags(golog.LstdFlags | golog.Lshortfile)
+			log.SetLogLevel(golog.LevelDebug)
+		} else if args.verbose {
+			golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc", "dcerpc", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/msdtyp", "msdtyp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mslsad", "mslsad", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssamr", "mssamr", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mswkst", "mswkst", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssrvs", "mssrvs", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msscmr", "msscmr", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			log.SetLogLevel(golog.LevelInfo)
+		} else {
+			golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc", "dcerpc", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/msdtyp", "msdtyp", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mslsad", "mslsad", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssamr", "mssamr", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mswkst", "mswkst", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssrvs", "mssrvs", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msscmr", "msscmr", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+			golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		}
 	}
 
 	if args.version {
@@ -774,17 +846,6 @@ func main() {
 	}
 	if args.host != "" && args.targetIP == "" {
 		args.targetIP = args.host
-	}
-
-	if args.socksIP != "" && isFlagSet("timeout") {
-		log.Errorln("When a socks proxy is specified, --timeout is not supported")
-		flags.Usage()
-		return
-	}
-
-	if args.dialTimeout < 1 {
-		log.Errorln("Valid value for the timeout is > 0 seconds")
-		return
 	}
 
 	switch action {

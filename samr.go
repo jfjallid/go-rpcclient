@@ -29,7 +29,9 @@ import (
 	"strings"
 
 	"github.com/jfjallid/go-smb/msdtyp"
+	"github.com/jfjallid/go-smb/smb"
 	"github.com/jfjallid/go-smb/smb/dcerpc"
+	"github.com/jfjallid/go-smb/smb/dcerpc/mslsad"
 	"github.com/jfjallid/go-smb/smb/dcerpc/mssamr"
 	"golang.org/x/term"
 )
@@ -380,6 +382,26 @@ func handleSamr(args *userArgs) (err error) {
 
 	rpccon := mssamr.NewRPCCon(bind)
 	fmt.Println("Successfully performed Bind to Samr service")
+
+	var rpcconLsat *mslsad.RPCCon
+	if args.resolveSids {
+		var f2 *smb.File
+		f2, err = conn.OpenFile(share, mslsad.MSRPCLsaRpcPipe)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+		defer f2.CloseFile()
+		var bind2 *dcerpc.ServiceBind
+		bind2, err = dcerpc.Bind(f2, mslsad.MSRPCUuidLsaRpc, mslsad.MSRPCLsaRpcMajorVersion, mslsad.MSRPCLsaRpcMinorVersion, dcerpc.MSRPCUuidNdr)
+		if err != nil {
+			log.Errorln("Failed to bind to LSARPC service")
+			log.Errorln(err)
+			return
+		}
+
+		rpcconLsat = mslsad.NewRPCCon(bind2)
+	}
 
 	if args.changeUserPassword {
 		var currPassBytes []byte
@@ -868,12 +890,44 @@ func handleSamr(args *userArgs) (err error) {
 			log.Errorln(err)
 			return
 		}
-		fmt.Println("Local admins:")
-		for _, member := range members {
-			fmt.Printf("Member: %s\n", member.ToString())
+		var names []string
+		var sids []string
+		for _, item := range members {
+			sids = append(sids, item.ToString())
 		}
+		if args.resolveSids {
+			// Attempt to translate SIDs
+			res, err := rpcconLsat.LsarLookupSids2(1, sids)
+			if err != nil {
+				log.Errorln(err)
+			} else {
+				for _, item := range res.TranslatedNames {
+					if item.Use == mslsad.SidTypeUnknown {
+						names = append(names, "<unknown>")
+					} else {
+						if item.DomainIndex != -1 {
+							names = append(names, fmt.Sprintf("%s\\%s", res.ReferencedDomains[item.DomainIndex].Name, item.Name))
+						} else {
+							names = append(names, item.Name)
+						}
+					}
+				}
+			}
+		}
+		var sb strings.Builder
+		fmt.Println("Local admins:")
+		for i, sid := range sids {
+			fmt.Fprintf(&sb, "Member SID: %s", sid)
+			if len(names) > 0 {
+				fmt.Fprintf(&sb, " (%s)", names[i])
+			}
+			fmt.Fprintf(&sb, "\n")
+		}
+		fmt.Println(sb.String())
 		return
 	} else if args.listGroupMembers {
+		// Use domain SID from domain handle together with the retrieved RIDs
+		var names []string
 		if args.alias {
 			var members []msdtyp.SID
 			members, err = rpccon.SamrGetMembersInAlias(handleLocalGroup)
@@ -881,10 +935,38 @@ func handleSamr(args *userArgs) (err error) {
 				log.Errorln(err)
 				return
 			}
-			fmt.Println("Members in alias:")
-			for _, member := range members {
-				fmt.Printf("Member: %s\n", member.ToString())
+			if args.resolveSids {
+				var sids []string
+				for _, item := range members {
+					sids = append(sids, item.ToString())
+				}
+				res, err := rpcconLsat.LsarLookupSids2(1, sids)
+				if err != nil {
+					log.Errorln(err)
+				} else {
+					for _, item := range res.TranslatedNames {
+						if item.Use == mslsad.SidTypeUnknown {
+							names = append(names, "<unknown>")
+						} else {
+							if item.DomainIndex != -1 {
+								names = append(names, fmt.Sprintf("%s\\%s", res.ReferencedDomains[item.DomainIndex].Name, item.Name))
+							} else {
+								names = append(names, item.Name)
+							}
+						}
+					}
+				}
 			}
+			var sb strings.Builder
+			fmt.Println("Members in alias:")
+			for i, sid := range members {
+				fmt.Fprintf(&sb, "Member SID: %s", sid.ToString())
+				if len(names) > 0 {
+					fmt.Fprintf(&sb, " (%s)", names[i])
+				}
+				fmt.Fprintf(&sb, "\n")
+			}
+			fmt.Println(sb.String())
 		} else {
 			var members []mssamr.SamrGroupMember
 			members, err = rpccon.SamrGetMembersInGroup(handleLocalGroup)
@@ -892,10 +974,39 @@ func handleSamr(args *userArgs) (err error) {
 				log.Errorln(err)
 				return
 			}
-			fmt.Println("Members in group:")
-			for _, member := range members {
-				fmt.Printf("Member RID: %d\n", member.RID)
+			if args.resolveSids {
+				domainSid := domainId.ToString()
+				var sids []string
+				for _, item := range members {
+					sids = append(sids, fmt.Sprintf("%s-%d", domainSid, item.RID))
+				}
+				res, err := rpcconLsat.LsarLookupSids2(1, sids)
+				if err != nil {
+					log.Errorln(err)
+				} else {
+					for _, item := range res.TranslatedNames {
+						if item.Use == mslsad.SidTypeUnknown {
+							names = append(names, "<unknown>")
+						} else {
+							if item.DomainIndex != -1 {
+								names = append(names, fmt.Sprintf("%s\\%s", res.ReferencedDomains[item.DomainIndex].Name, item.Name))
+							} else {
+								names = append(names, item.Name)
+							}
+						}
+					}
+				}
 			}
+			var sb strings.Builder
+			fmt.Println("Members in group:")
+			for i, member := range members {
+				fmt.Fprintf(&sb, "Member RID: %d", member.RID)
+				if len(names) > 0 {
+					fmt.Fprintf(&sb, " (%s)", names[i])
+				}
+				fmt.Fprintf(&sb, "\n")
+			}
+			fmt.Println(sb.String())
 		}
 		return
 	}

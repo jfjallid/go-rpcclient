@@ -44,7 +44,7 @@ import (
 )
 
 var log = golog.Get("")
-var release string = "0.2.1"
+var release string = "0.2.2"
 var flags *flag.FlagSet
 
 var helpMsg = `
@@ -89,12 +89,15 @@ var helpConnectionOptions = `
           --smb2                 Force smb 2.1
           --debug                Enable debug logging
           --verbose              Enable verbose logging
+          --resolve-sids         Attempt to translate SIDs using MS-LSAT
       -v, --version              Show version
 `
 
 // Custom types to help with argument parsing and validation
 type ridList []uint32
 type stringList []string
+type sidList []SID
+
 type SID struct {
 	s string
 	v *msdtyp.SID
@@ -173,6 +176,42 @@ func (n *binaryArg) Set(value string) error {
 	return nil
 }
 
+func (n *sidList) String() string {
+	var sb strings.Builder
+	for _, item := range *n {
+		fmt.Fprintf(&sb, "%s,", item.s)
+	}
+	return sb.String()
+}
+
+func (n *sidList) Set(value string) error {
+	parts := strings.Split(value, ",")
+	for i, _ := range parts {
+		str := strings.TrimSpace(parts[i])
+		if strings.Contains(str, " ") {
+			return fmt.Errorf("Sids should be separated by comma, not by space.")
+		}
+		if str != "" {
+			var s SID
+			err := s.Set(str)
+			if err != nil {
+				return fmt.Errorf("Failed to parse SID from user argument: %s", err.Error())
+			}
+			*n = append(*n, s)
+		}
+	}
+
+	return nil
+}
+
+func (n *sidList) GetStrings() []string {
+	res := make([]string, 0)
+	for _, item := range *n {
+		res = append(res, item.s)
+	}
+	return res
+}
+
 func isFlagSet(name string) bool {
 	found := false
 	flags.Visit(func(f *flag.Flag) {
@@ -229,15 +268,16 @@ type connArgs struct {
 }
 
 type generalArgs struct {
-	debug   bool
-	version bool
-	verbose bool
-	samr    bool
-	lsad    bool
-	srvs    bool
-	wkst    bool
-	scmr    bool
-	rrp     bool
+	debug       bool
+	version     bool
+	verbose     bool
+	samr        bool
+	lsad        bool
+	srvs        bool
+	wkst        bool
+	scmr        bool
+	rrp         bool
+	resolveSids bool
 }
 
 type userArgs struct {
@@ -250,6 +290,10 @@ type userArgs struct {
 	removeRights  bool
 	getDomainInfo bool
 	purgeRights   bool
+	// LSAT actions
+	lookupSids  bool
+	getUserName bool
+	// lookupNames bool
 	// SAMR actions
 	enumDomains          bool
 	enumUsers            bool
@@ -274,8 +318,9 @@ type userArgs struct {
 	enumSessions bool
 	// SRVS actions
 	// enumSessions
-	enumShares    bool
-	getServerInfo bool
+	enumShares      bool
+	getServerInfo   bool
+	getFileSecurity bool
 	// SCMR actions
 	enumServices        bool
 	enumServiceConfigs  bool
@@ -300,6 +345,7 @@ type userArgs struct {
 	setKeySecurity bool
 	// arguments
 	sid                 SID
+	sids                sidList
 	rights              stringList
 	systemRights        bool
 	rid                 uint64
@@ -333,6 +379,8 @@ type userArgs struct {
 	ownerSid            SID
 	debugPrivilege      bool
 	createAndStart      bool
+	share               string
+	filePath            string
 }
 
 func addConnectionArgs(flagSet *flag.FlagSet, argv *userArgs) {
@@ -367,6 +415,7 @@ func addConnectionArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.StringVar(&argv.aesKey, "aes-key", "", "")
 	flagSet.StringVar(&argv.dnsHost, "dns-host", "", "")
 	flagSet.BoolVar(&argv.dnsTCP, "dns-tcp", false, "")
+	flagSet.BoolVar(&argv.resolveSids, "resolve-sids", false, "")
 
 }
 
@@ -413,8 +462,15 @@ func addLsadArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.BoolVar(&argv.purgeRights, "purge", false, "")
 	flagSet.BoolVar(&argv.getDomainInfo, "getinfo", false, "")
 	flagSet.Var(&argv.sid, "sid", "")
+	flagSet.Var(&argv.sids, "sids", "")
 	flagSet.Var(&argv.rights, "rights", "")
+	flagSet.IntVar(&argv.level, "level", 1, "")
 	flagSet.BoolVar(&argv.systemRights, "system", false, "")
+	flagSet.BoolVar(&argv.getUserName, "whoami", false, "")
+	flagSet.BoolVar(&argv.getUserName, "get-username", false, "")
+	flagSet.BoolVar(&argv.lookupSids, "lookup-sids", false, "")
+	flagSet.BoolVar(&argv.lookupNames, "lookup-names", false, "")
+	flagSet.Var(&argv.names, "names", "")
 }
 
 func addWkstArgs(flagSet *flag.FlagSet, argv *userArgs) {
@@ -426,7 +482,10 @@ func addSrvsArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.BoolVar(&argv.enumSessions, "enum-sessions", false, "")
 	flagSet.BoolVar(&argv.enumShares, "enum-shares", false, "")
 	flagSet.BoolVar(&argv.getServerInfo, "get-info", false, "")
+	flagSet.BoolVar(&argv.getFileSecurity, "get-file-security", false, "")
 	flagSet.IntVar(&argv.level, "level", 0, "")
+	flagSet.StringVar(&argv.share, "share", "", "")
+	flagSet.StringVar(&argv.filePath, "path", "", "")
 }
 
 func addScmrArgs(flagSet *flag.FlagSet, argv *userArgs) {

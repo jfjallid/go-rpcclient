@@ -18,32 +18,35 @@ Usage: ./go-rpcclient <service> [options]
   -i, --interactive         Launch interactive mode
   
 General options:
-      --host <ip/hostname>  Hostname or ip address of remote server. Must be hostname when using Kerberos
-  -P, --port [port]         SMB Port (default 445)
-  -d, --domain [name/fqdn]  Domain name to use for login
-  -u, --user   [string]     Username. Not required for Kerberos auth
-  -p, --pass   [string]     Password. Prompted if not specified
-  -n, --no-pass             Disable password prompt and send no credentials
-      --hash   [hex]        Hex encoded NT Hash for user password
-      --local               Authenticate as a local user instead of domain user
-      --null                Attempt null session authentication
-  -k, --kerberos            Use Kerberos authentication. (KRB5CCNAME will be checked on Linux)
-      --dc-ip     [ip]      Optionally specify ip of KDC when using Kerberos authentication
-      --target-ip [ip]      Optionally specify ip of target when using Kerberos authentication
-      --aes-key   [hex]     Use a hex encoded AES128/256 key for Kerberos authentication
-  -t, --timeout   [int]     Dial timeout in seconds (default 5)
-      --relay               Start an SMB listener that will relay incoming
-                            NTLM authentications to the remote server and
-                            use that connection. NOTE that this forces SMB 2.1
-                            without encryption.
-      --relay-port [port]   Listening port for relay (default 445)
-      --socks-host [target] Establish connection via a SOCKS5 proxy server
-      --socks-port [port]   SOCKS5 proxy port (default 1080)
-      --noenc               Disable smb encryption
-      --smb2                Force smb 2.1
-      --debug               Enable debug logging
-      --verbose             Enable verbose logging
-  -v, --version             Show version
+      --host <ip/hostname>   Hostname or ip address of remote server. Must be hostname when using Kerberos
+  -P, --port <port>          SMB Port (default 445)
+  -d, --domain <name/fqdn>   Domain name to use for login
+  -u, --user   <string>      Username. Not required for Kerberos auth
+  -p, --pass   <string>      Password. Prompted if not specified
+  -n, --no-pass              Disable password prompt and send no credentials
+      --hash   <hex>         Hex encoded NT Hash for user password
+      --local                Authenticate as a local user instead of domain user
+      --null                 Attempt null session authentication
+  -k, --kerberos             Use Kerberos authentication. (KRB5CCNAME will be checked on Linux)
+      --dc-ip     <ip>       Optionally specify ip of KDC when using Kerberos authentication
+      --target-ip <ip>       Optionally specify ip of target when using Kerberos authentication
+      --aes-key   <hex>      Use a hex encoded AES128/256 key for Kerberos authentication
+      --dns-host <ip[:port]> Override system's default DNS resolver
+      --dns-tcp              Force DNS lookups over TCP. Default true when using --socks-host
+  -t, --timeout <duration>   Dial timeout specified in 5s, 1m, 10m format (default 5s)
+      --relay                Start an SMB listener that will relay incoming
+                             NTLM authentications to the remote server and
+                             use that connection. NOTE that this forces SMB 2.1
+                             without encryption.
+      --relay-port <port>    Listening port for relay (default 445)
+      --socks-host <target>  Establish connection via a SOCKS5 proxy server
+      --socks-port <port>    SOCKS5 proxy port (default 1080)
+      --noenc                Disable smb encryption
+      --smb2                 Force smb 2.1
+      --debug                Enable debug logging
+      --verbose              Enable verbose logging
+      --resolve-sids         Attempt to translate SIDs using MS-LSAT
+  -v, --version              Show version
 ```
 
 ### WKST specific usage
@@ -65,9 +68,12 @@ Action:
       --enum-sessions      List sessions (supported levels 0, 10, 502. Default 10)
       --enum-shares        List SMB Shares
       --get-info           Get Server info (supported levels 100,101,102. Default 101. 102 requires admin privileges)
+      --get-file-security  Get security descriptor for file/folder on specified share
 
 SRVS options:
       --level <int>        Level of information to return
+      --share <string>     Name of share to query for security descriptor
+      --path  <string>     Path to file or folder to get security descriptor for
 ```
 
 ### LSAD specific usage
@@ -81,9 +87,15 @@ Action:
       --remove              Remove LSA rights specified by --rights from account specified by --sid
       --getinfo             Get primary domain name and domain SID
       --purge               Removes all rights for the specified --sid
+      --lookup-sids         Attempts to translate the sids specified by --sids to names
+      --lookup-names        Attempts to translate the sids specified by --names to sids
+      --whoami              Get the identity of the authenticated user
 
 LSA options:
       --sid    <SID>        Target SID of format "S-1-5-...-...-..."
+      --level  <num>        LookupLevel for --lookup-sids (default 1, LookupWksta)
+      --sids   <list>       Comma-separated list of SIDs to lookup of format "S-1-5-...-...-..."
+      --names  <list>       Comma-separated list of names to lookup
       --rights <list>       Comma-separated list of rights. E.g., "SeDebugPrivilege,SeLoadDriverPrivilege"
       --system              Target system rights instead of user rights(privileges) when listing and adding rights (default false)
 ```

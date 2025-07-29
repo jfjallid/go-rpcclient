@@ -32,6 +32,7 @@ import (
 	"github.com/jfjallid/go-smb/msdtyp"
 	"github.com/jfjallid/go-smb/smb"
 	"github.com/jfjallid/go-smb/smb/dcerpc"
+	"github.com/jfjallid/go-smb/smb/dcerpc/mslsad"
 	"github.com/jfjallid/go-smb/smb/dcerpc/mssamr"
 	"github.com/jfjallid/golog"
 	"golang.org/x/term"
@@ -485,10 +486,47 @@ func listGroupMembers(self *shell, argArr interface{}) {
 		self.println(err)
 		return
 	}
-	self.println("Members in group:")
-	for _, member := range members {
-		self.printf("Member RID: %d\n", member.RID)
+	var names []string
+	if self.resolveSids {
+		// Attempt to translate SIDs
+		rpcconLsat, err := self.getLsadHandle()
+		if err != nil {
+			self.println(err)
+			return
+		}
+
+		domainSid := self.samrDomainIds[domainName].ToString()
+		var sids []string
+		for _, item := range members {
+			sids = append(sids, fmt.Sprintf("%s-%d", domainSid, item.RID))
+		}
+		res, err := rpcconLsat.LsarLookupSids2(1, sids)
+		if err != nil {
+			self.println(err)
+			return
+		}
+		for _, item := range res.TranslatedNames {
+			if item.Use == mslsad.SidTypeUnknown {
+				names = append(names, "<unknown>")
+			} else {
+				if item.DomainIndex != -1 {
+					names = append(names, fmt.Sprintf("%s\\%s", res.ReferencedDomains[item.DomainIndex].Name, item.Name))
+				} else {
+					names = append(names, item.Name)
+				}
+			}
+		}
 	}
+	var sb strings.Builder
+	self.println("Members in group:")
+	for i, member := range members {
+		fmt.Fprintf(&sb, "Member RID: %d", member.RID)
+		if len(names) > 0 {
+			fmt.Fprintf(&sb, " (%s)", names[i])
+		}
+		fmt.Fprintf(&sb, "\n")
+	}
+	self.println(sb.String())
 }
 
 func addLocalGroupMember(self *shell, argArr interface{}) {
@@ -708,10 +746,46 @@ func listAliasMembers(self *shell, argArr interface{}) {
 		self.println(err)
 		return
 	}
-	self.println("Members in alias:")
-	for _, member := range members {
-		self.printf("Member SID: %s\n", member.ToString())
+	var names []string
+	var sids []string
+	for _, item := range members {
+		sids = append(sids, item.ToString())
 	}
+
+	if self.resolveSids {
+		// Attempt to translate SIDs
+		rpcconLsat, err := self.getLsadHandle()
+		if err != nil {
+			self.println(err)
+			return
+		}
+		res, err := rpcconLsat.LsarLookupSids2(1, sids)
+		if err != nil {
+			self.println(err)
+			return
+		}
+		for _, item := range res.TranslatedNames {
+			if item.Use == mslsad.SidTypeUnknown {
+				names = append(names, "<unknown>")
+			} else {
+				if item.DomainIndex != -1 {
+					names = append(names, fmt.Sprintf("%s\\%s", res.ReferencedDomains[item.DomainIndex].Name, item.Name))
+				} else {
+					names = append(names, item.Name)
+				}
+			}
+		}
+	}
+	var sb strings.Builder
+	self.println("Members in alias:")
+	for i, sid := range sids {
+		fmt.Fprintf(&sb, "Member SID: %s", sid)
+		if len(names) > 0 {
+			fmt.Fprintf(&sb, " (%s)", names[i])
+		}
+		fmt.Fprintf(&sb, "\n")
+	}
+	self.println(sb.String())
 }
 
 func addMemberToLocalAlias(self *shell, argArr interface{}) {

@@ -67,6 +67,7 @@ type shell struct {
 	regHiveHandles          map[byte][]byte
 	regOpenCreateKeyOptions uint32
 	verbose                 bool
+	resolveSids             bool
 	helpMapKeys             []int // Ordered list of keys for the helpFunctions map
 }
 
@@ -79,6 +80,7 @@ const (
 	CloseConn         = "close"
 	ExitShell         = "exit"
 	ToggleVerboseMode = "toggleverbose"
+	ToggleResolveSids = "toggleresolvesids"
 )
 
 var usageMap = map[string]string{
@@ -90,6 +92,7 @@ var usageMap = map[string]string{
 	CloseConn:         CloseConn,
 	ExitShell:         ExitShell,
 	ToggleVerboseMode: ToggleVerboseMode,
+	ToggleResolveSids: ToggleResolveSids,
 }
 
 var descriptionMap = map[string]string{
@@ -101,6 +104,7 @@ var descriptionMap = map[string]string{
 	CloseConn:         "Closes the current SMB connection",
 	ExitShell:         "Terminates the server process (and this session)",
 	ToggleVerboseMode: "Toggle verbose outprints",
+	ToggleResolveSids: "Toggle automatic SID translation",
 }
 
 // Combination of all usage keys
@@ -115,6 +119,7 @@ var generalUsageKeys = []string{
 	CloseConn,
 	ExitShell,
 	ToggleVerboseMode,
+	ToggleResolveSids,
 }
 
 func completer(line string) (completions []string) {
@@ -244,6 +249,16 @@ func toggleVerboseMode(self *shell, argArr interface{}) {
 	self.verbose = true
 }
 
+func toggleSidResolvingMode(self *shell, argArr interface{}) {
+	if self.resolveSids {
+		self.resolveSids = false
+		self.println("Sid resolving mode deactivated!")
+		return
+	}
+	self.println("Sid resolving mode activated!")
+	self.resolveSids = true
+}
+
 func newShell(args *connArgs) *shell {
 	o := args.opts
 	s := shell{
@@ -274,6 +289,7 @@ func newShell(args *connArgs) *shell {
 	handlers["help"] = showHelpFunc
 	handlers["?"] = showHelpFunc
 	handlers[ToggleVerboseMode] = toggleVerboseMode
+	handlers[ToggleResolveSids] = toggleSidResolvingMode
 	handlers[OpenConn] = openConnectionFunc
 	handlers[CloseConn] = closeConnectionFunc
 	handlers[Login] = loginFunc

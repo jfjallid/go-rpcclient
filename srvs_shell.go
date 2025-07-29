@@ -25,38 +25,44 @@ import (
 	"fmt"
 	"maps"
 	"strconv"
+	"strings"
 
 	"github.com/jfjallid/go-smb/smb"
 	"github.com/jfjallid/go-smb/smb/dcerpc"
+	"github.com/jfjallid/go-smb/smb/dcerpc/mslsad"
 	"github.com/jfjallid/go-smb/smb/dcerpc/mssrvs"
 	"github.com/jfjallid/golog"
 )
 
 const (
-	SrvsEnumSessions = "srvsenumsessions"
-	SrvsEnumShares   = "srvsenumshares"
-	SrvsGetInfo      = "srvsgetinfo"
+	SrvsEnumSessions    = "srvsenumsessions"
+	SrvsEnumShares      = "srvsenumshares"
+	SrvsGetInfo         = "srvsgetinfo"
+	SrvsGetFileSecurity = "srvsgetfilesecurity"
 )
 
 var srvsUsageKeys = []string{
 	SrvsEnumSessions,
 	SrvsEnumShares,
 	SrvsGetInfo,
+	SrvsGetFileSecurity,
 }
 var srvsUsageMap = map[string]string{
-	SrvsEnumSessions: SrvsEnumSessions + " [level]",
-	SrvsEnumShares:   SrvsEnumShares,
-	SrvsGetInfo:      SrvsGetInfo + " [level]",
+	SrvsEnumSessions:    SrvsEnumSessions + " [level]",
+	SrvsEnumShares:      SrvsEnumShares,
+	SrvsGetInfo:         SrvsGetInfo + " [level]",
+	SrvsGetFileSecurity: SrvsGetFileSecurity + " <share> <path>",
 }
 
 var srvsDescriptionMap = map[string]string{
-	SrvsEnumSessions: "List network sessions (supported levels 0, 10, 502. Default 10)",
-	SrvsEnumShares:   "List SMB Shares",
-	SrvsGetInfo:      "Get Server info (supported levels 100,101,102. Default 101. 102 requires admin privileges)",
+	SrvsEnumSessions:    "List network sessions (supported levels 0, 10, 502. Default 10)",
+	SrvsEnumShares:      "List SMB Shares",
+	SrvsGetInfo:         "Get Server info (supported levels 100,101,102. Default 101. 102 requires admin privileges)",
+	SrvsGetFileSecurity: "Get security descriptor for file/folder on specified share",
 }
 
 func printSrvsHelp(self *shell) {
-	self.showCustomHelpFunc(30, "MS-SRVS", srvsUsageKeys)
+	self.showCustomHelpFunc(34, "MS-SRVS", srvsUsageKeys)
 }
 
 func init() {
@@ -67,6 +73,7 @@ func init() {
 	handlers[SrvsGetInfo] = getServerInfoFunc
 	handlers[SrvsEnumSessions] = getNetSessionsFunc
 	handlers[SrvsEnumShares] = listSharesFunc
+	handlers[SrvsGetFileSecurity] = getFileSecurityFunc
 	helpFunctions[1] = printSrvsHelp
 }
 
@@ -196,4 +203,100 @@ func getNetSessionsFunc(self *shell, argArr interface{}) {
 	}
 
 	return
+}
+
+func getFileSecurityFunc(self *shell, argArr interface{}) {
+	if !self.authenticated {
+		self.println("Not logged in!")
+		return
+	}
+	usage := "Usage: " + usageMap[SrvsGetFileSecurity]
+	args := argArr.([]string)
+	share := ""
+	path := ""
+
+	if len(args) < 2 {
+		self.println(usage)
+		return
+	} else {
+		share = args[0]
+		path = strings.Join(args[1:], " ")
+	}
+	//TODO Maybe do some basic validation on the arguments?
+	if strings.Contains(path, ":") {
+		// Remove drive prefix
+		path = strings.SplitN(path, ":", 2)[1]
+	}
+
+	rpccon, err := self.getSrvsHandle()
+	if err != nil {
+		self.println(err)
+		return
+	}
+	var rpcconLsat *mslsad.RPCCon
+	if self.resolveSids {
+		rpcconLsat, err = self.getLsadHandle()
+		if err != nil {
+			self.println(err)
+			return
+		}
+	}
+	sd, names, err := getFileSecurity(rpccon, rpcconLsat, share, path, self.resolveSids)
+	if err != nil {
+		self.println(err)
+		return
+	}
+
+	self.printf("Security information for share: %s, file: %s\n", share, path)
+	var sb strings.Builder
+	if sd.OwnerSid != nil {
+		fmt.Fprintf(&sb, "OwnerSid: %s", sd.OwnerSid.ToString())
+		if self.resolveSids && len(names) > 0 {
+			fmt.Fprintf(&sb, "(%s)", names[0])
+		}
+		sb.WriteRune('\n')
+		names = names[1:]
+	}
+	if sd.GroupSid != nil {
+		fmt.Fprintf(&sb, "GroupSid: %s", sd.GroupSid.ToString())
+		if self.resolveSids && len(names) > 0 {
+			fmt.Fprintf(&sb, "(%s)", names[0])
+		}
+		sb.WriteRune('\n')
+		names = names[1:]
+	}
+	if sd.Dacl != nil {
+		fmt.Fprintln(&sb, "DACL entries:")
+		daclPermissions := sd.Dacl.Permissions()
+		for _, item := range daclPermissions.Entries {
+			fmt.Fprintf(&sb, "AceType: %s\nAceFlags: %s\nSid: %s\n", item.AceType, item.AceFlagStrings, item.Sid)
+			if self.resolveSids && len(names) > 0 {
+				fmt.Fprintf(&sb, "Name: %s\n", names[0])
+				names = names[1:]
+			}
+			fmt.Fprintf(&sb, "Permissions: ")
+			permissions := ""
+			for _, perm := range item.Permissions {
+				permissions = fmt.Sprintf("%s,%s", permissions, perm)
+			}
+			sb.WriteString(strings.TrimPrefix(permissions, ","))
+			sb.WriteString("\n")
+		}
+	}
+	if sd.Sacl != nil {
+		fmt.Fprintln(&sb, "SACL entries:")
+		saclPermissions := sd.Sacl.Permissions()
+		for _, item := range saclPermissions.Entries {
+			fmt.Fprintf(&sb, "AceType: %s\nAceFlags: %s\nSid: %s\n", item.AceType, item.AceFlagStrings, item.Sid)
+			fmt.Fprintf(&sb, "Permissions: ")
+			permissions := ""
+			for _, perm := range item.Permissions {
+				permissions = fmt.Sprintf("%s,%s", permissions, perm)
+			}
+			sb.WriteString(strings.TrimPrefix(permissions, ","))
+			sb.WriteString("\n")
+		}
+	}
+	self.println(sb.String())
+
 }

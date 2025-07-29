@@ -40,6 +40,9 @@ const (
 	LsadDelRights     = "lsadelrights"
 	LsadGetDominfo    = "lsagetdominfo"
 	LsadPurgeRights   = "lsapurgerights"
+	LsatLookupNames   = "lsalookupnames"
+	LsatLookupSids    = "lsalookupsids"
+	LsatGetUserName   = "lsagetusername"
 )
 
 var lsadUsageKeys = []string{
@@ -49,6 +52,9 @@ var lsadUsageKeys = []string{
 	LsadDelRights,
 	LsadGetDominfo,
 	LsadPurgeRights,
+	LsatLookupNames,
+	LsatLookupSids,
+	LsatGetUserName,
 }
 var lsadUsageMap = map[string]string{
 	LsadEnumAccounts:  LsadEnumAccounts,
@@ -57,6 +63,9 @@ var lsadUsageMap = map[string]string{
 	LsadDelRights:     LsadDelRights + " <SID> <rights...>",
 	LsadGetDominfo:    LsadGetDominfo,
 	LsadPurgeRights:   LsadPurgeRights + " <SID>",
+	LsatLookupNames:   LsatLookupNames + " <name [name name ...]",
+	LsatLookupSids:    LsatLookupSids + " <SID [SID SID ...]>",
+	LsatGetUserName:   LsatGetUserName,
 }
 
 var lsadDescriptionMap = map[string]string{
@@ -66,10 +75,13 @@ var lsadDescriptionMap = map[string]string{
 	LsadDelRights:     "Remove list of LSA rights from account specified by SID",
 	LsadGetDominfo:    "Get primary domain name and domain SID",
 	LsadPurgeRights:   "Removes all LSA rights for the specified SID",
+	LsatLookupNames:   "Attempts to translate the sids specified by --names to sids",
+	LsatLookupSids:    "Attempts to translate the sids specified by --sids to names",
+	LsatGetUserName:   "Get the identity of the authenticated user",
 }
 
 func printLsadHelp(self *shell) {
-	self.showCustomHelpFunc(30, "MS-LSAD", lsadUsageKeys)
+	self.showCustomHelpFunc(36, "MS-LSAD", lsadUsageKeys)
 }
 
 func init() {
@@ -83,6 +95,10 @@ func init() {
 	handlers[LsadDelRights] = removeLSAAccountRights
 	handlers[LsadPurgeRights] = purgeLSAAccountRights
 	handlers[LsadGetDominfo] = getLSAPrimaryDomainInfo
+	handlers[LsatLookupNames] = lsaLookupNames
+	handlers[LsatLookupSids] = lsaLookupSids
+	handlers[LsatGetUserName] = getLSAUserName
+	handlers["whoami"] = getLSAUserName
 	helpFunctions[3] = printLsadHelp
 }
 
@@ -129,9 +145,40 @@ func getLSAAccount(self *shell, argArr interface{}) {
 		self.println(err)
 		return
 	}
-	for _, item := range accounts {
-		self.println(item)
+	var names []string
+	if self.resolveSids {
+		// Attempt to translate SIDs
+		rpcconLsat, err := self.getLsadHandle()
+		if err != nil {
+			self.println(err)
+			return
+		}
+		res, err := rpcconLsat.LsarLookupSids2(1, accounts)
+		if err != nil {
+			self.println(err)
+			return
+		}
+		for _, item := range res.TranslatedNames {
+			if item.Use == mslsad.SidTypeUnknown {
+				names = append(names, "<unknown>")
+			} else {
+				if item.DomainIndex != -1 {
+					names = append(names, fmt.Sprintf("%s\\%s", res.ReferencedDomains[item.DomainIndex].Name, item.Name))
+				} else {
+					names = append(names, item.Name)
+				}
+			}
+		}
 	}
+	var sb strings.Builder
+	for i, sid := range accounts {
+		sb.WriteString(sid)
+		if len(names) > 0 {
+			fmt.Fprintf(&sb, " (%s)", names[i])
+		}
+		fmt.Fprintf(&sb, "\n")
+	}
+	self.println(sb.String())
 }
 
 func getLSAAccountRights(self *shell, argArr interface{}) {
@@ -318,4 +365,123 @@ func getLSAPrimaryDomainInfo(self *shell, argArr interface{}) {
 		return
 	}
 	self.printf("Domain: %s, SID: %s\n", domInfo.Name, domInfo.Sid.ToString())
+}
+
+func getLSAUserName(self *shell, argArr interface{}) {
+	if !self.authenticated {
+		self.println("Not logged in!")
+		return
+	}
+
+	rpccon, err := self.getLsadHandle()
+	if err != nil {
+		self.println(err)
+		return
+	}
+
+	username, domain, err := rpccon.LsarGetUserName()
+	if err != nil {
+		self.println(err)
+		return
+	}
+	self.printf("Username: %s, Domain: %s\n", username, domain)
+}
+
+func lsaLookupSids(self *shell, argArr interface{}) {
+	if !self.authenticated {
+		self.println("Not logged in!")
+		return
+	}
+	usage := "Usage: " + usageMap[LsatLookupSids]
+
+	args := argArr.([]string)
+	var sids []string
+	if len(args) < 1 {
+		self.println(usage)
+		return
+	} else {
+		sids = append(sids, args...)
+		// sanity check
+		for _, item := range sids {
+			if strings.Contains(item, ",") {
+				self.println("List of sids should be separated by spaces")
+				self.println(usage)
+				return
+			}
+		}
+	}
+
+	rpccon, err := self.getLsadHandle()
+	if err != nil {
+		self.println(err)
+		return
+	}
+	res, err := rpccon.LsarLookupSids2(1, sids)
+	if err != nil {
+		self.println(err)
+		return
+	}
+	if len(res.TranslatedNames) == 0 {
+		self.printf("Failed to translate names and got a return code of: 0x%08x\n", res.ReturnCode)
+		return
+	}
+	for i, item := range res.TranslatedNames {
+		referencedDomain := "<Unknown>"
+		domainSid := "<Unknown>"
+		if item.DomainIndex >= 0 {
+			referencedDomain = res.ReferencedDomains[item.DomainIndex].Name
+			domainSid = res.ReferencedDomains[item.DomainIndex].Sid
+		}
+		self.printf("Sid: %s\nSidType: %s\nName: %s\nDomain: %s\nDomainSid: %s\n\n", sids[i], mslsad.SidNameUseMap[item.Use], item.Name, referencedDomain, domainSid)
+	}
+}
+
+func lsaLookupNames(self *shell, argArr interface{}) {
+	if !self.authenticated {
+		self.println("Not logged in!")
+		return
+	}
+
+	usage := "Usage: " + usageMap[LsatLookupNames]
+
+	args := argArr.([]string)
+	var names []string
+	if len(args) < 1 {
+		self.println(usage)
+		return
+	} else {
+		names = append(names, args...)
+		// sanity check
+		for _, item := range names {
+			if strings.Contains(item, ",") {
+				self.println("List of names should be separated by spaces")
+				self.println(usage)
+				return
+			}
+		}
+	}
+
+	rpccon, err := self.getLsadHandle()
+	if err != nil {
+		self.println(err)
+		return
+	}
+	res, err := rpccon.LsarLookupNames3(1, names)
+	if err != nil {
+		self.println(err)
+		return
+	}
+	if len(res.TranslatedSids) == 0 {
+		self.printf("Failed to translate Sids and got a return code of: 0x%08x\n", res.ReturnCode)
+		return
+	}
+	for i, item := range res.TranslatedSids {
+		referencedDomain := "<Unknown>"
+		domainSid := "<Unknown>"
+		if item.DomainIndex >= 0 {
+			referencedDomain = res.ReferencedDomains[item.DomainIndex].Name
+			domainSid = res.ReferencedDomains[item.DomainIndex].Sid
+		}
+		self.printf("Name: %s\nSidType: %s\nSid: %s\nDomain: %s\nDomainSid: %s\n\n", names[i], mslsad.SidNameUseMap[item.Use], item.Sid, referencedDomain, domainSid)
+	}
 }

@@ -26,9 +26,10 @@ import (
 	"maps"
 	"strings"
 
+	"github.com/jfjallid/go-smb/dcerpc"
+	"github.com/jfjallid/go-smb/dcerpc/msscmr"
+	"github.com/jfjallid/go-smb/dcerpc/smbtransport"
 	"github.com/jfjallid/go-smb/smb"
-	"github.com/jfjallid/go-smb/smb/dcerpc"
-	"github.com/jfjallid/go-smb/smb/dcerpc/msscmr"
 	"github.com/jfjallid/golog"
 )
 
@@ -59,13 +60,13 @@ var scmrUsageKeys = []string{
 }
 
 var scmrUsageMap = map[string]string{
-	ScmrEnumServices:    ScmrEnumServices,
+	ScmrEnumServices:    ScmrEnumServices + " [<state> [type]]",
 	ScmrEnumSvcConfigs:  ScmrEnumSvcConfigs,
 	ScmrGetSvcConfig:    ScmrGetSvcConfig + " <name>",
 	ScmrGetSvcStatus:    ScmrGetSvcStatus + " <name>",
 	ScmrChangeSvcConfig: ScmrChangeSvcConfig + " <name>",
 	ScmrStartService:    ScmrStartService + " <name>",
-	ScmrControlService:  ScmrControlService + " <name>",
+	ScmrControlService:  ScmrControlService + " <name> <action>",
 	ScmrCreateService:   ScmrCreateService + " <name>",
 	ScmrDeleteService:   ScmrDeleteService + " <name>",
 	ScmrEnableService:   ScmrEnableService + " <name>",
@@ -92,7 +93,7 @@ func init() {
 	maps.Copy(usageMap, scmrUsageMap)
 	maps.Copy(descriptionMap, scmrDescriptionMap)
 	allKeys = append(allKeys, scmrUsageKeys...)
-	golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msscmr", "msscmr", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
+	golog.Set("github.com/jfjallid/go-smb/dcerpc/msscmr", "msscmr", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
 	handlers[ScmrEnumServices] = scmrEnumServicesFunc
 	handlers[ScmrEnumSvcConfigs] = scmrEnumServiceConfigsFunc
 	handlers[ScmrGetSvcConfig] = scmrGetServiceConfigFunc
@@ -118,8 +119,14 @@ func (self *shell) getScmrHandle() (rpccon *msscmr.RPCCon, err error) {
 			return
 		}
 		self.files = append(self.files, f)
+		transport, err2 := smbtransport.NewSMBTransport(f)
+		if err2 != nil {
+			err = err2
+			self.println(err)
+			return
+		}
 		var bind *dcerpc.ServiceBind
-		bind, err = dcerpc.Bind(f, msscmr.MSRPCUuidSvcCtl, msscmr.MSRPCSvcCtlMajorVersion, msscmr.MSRPCSvcCtlMinorVersion, dcerpc.MSRPCUuidNdr)
+		bind, err = dcerpc.Bind(transport, msscmr.MSRPCUuidSvcCtl, msscmr.MSRPCSvcCtlMajorVersion, msscmr.MSRPCSvcCtlMinorVersion, dcerpc.MSRPCUuidNdr)
 		if err != nil {
 			self.println("Failed to bind to service")
 			return
@@ -149,7 +156,6 @@ func scmrEnumServicesFunc(self *shell, argArr interface{}) {
 	if numArgs > 1 {
 		svcStateStr = args[0]
 		svcTypeStr = args[1]
-		return
 	} else if numArgs == 1 {
 		svcStateStr = args[0]
 	}
@@ -167,6 +173,12 @@ func scmrEnumServicesFunc(self *shell, argArr interface{}) {
 	} else {
 		serviceState = 0x3
 	}
+	if (serviceState > 0x3) || (serviceState == 0) {
+		self.println("Invalid ServiceState value")
+		self.println("Active 0x1, Inactive 0x2, All 0x3")
+		return
+	}
+
 	if svcTypeStr != "" {
 		val, err = parseNumericArg(svcTypeStr, serviceType)
 		if err != nil {
@@ -178,6 +190,11 @@ func scmrEnumServicesFunc(self *shell, argArr interface{}) {
 	} else {
 		serviceType = 0x30
 	}
+	if (serviceType & 0x33) == 0 {
+		self.println("Invalid ServiceType. Must be one or a combination of values from MS-SCMR dwServiceType:")
+		self.println("kernel_driver: 0x1, file_system_driver: 0x2, win32_own_service: 0x10, win32_share_process: 0x20")
+		return
+	}
 
 	var services []msscmr.EnumServiceStatusW
 	services, err = rpccon.EnumServicesStatus(serviceType, serviceState)
@@ -187,7 +204,7 @@ func scmrEnumServicesFunc(self *shell, argArr interface{}) {
 	}
 	self.println("Services:")
 	for _, item := range services {
-		self.printf("Service: %s\n Dislay Name: %s\n Status: %s\n", item.ServiceName, item.DisplayName, msscmr.ServiceStatusMap[item.ServiceStatus.CurrentState])
+		self.printf("Service: %s\n Display Name: %s\n Status: %s\n", item.ServiceName, item.DisplayName, msscmr.ServiceStatusMap[item.ServiceStatus.CurrentState])
 	}
 	return
 }
@@ -209,7 +226,6 @@ func scmrEnumServiceConfigsFunc(self *shell, argArr interface{}) {
 	if numArgs > 1 {
 		svcStateStr = args[0]
 		svcTypeStr = args[1]
-		return
 	} else if numArgs == 1 {
 		svcStateStr = args[0]
 	}
@@ -311,7 +327,7 @@ func scmrGetServiceStatusFunc(self *shell, argArr interface{}) {
 		self.println("Not logged in!")
 		return
 	}
-	usage := "Usage: " + usageMap[ScmrGetSvcConfig]
+	usage := "Usage: " + usageMap[ScmrGetSvcStatus]
 	var name string
 	rpccon, err := self.getScmrHandle()
 	if err != nil {
@@ -397,7 +413,7 @@ func scmrChangeServiceConfigFunc(self *shell, argArr interface{}) {
 		itemsChanged = append(itemsChanged, fmt.Sprintf("service start type: 0x%x", svcStartType))
 	}
 
-	svcErrorCtlStr, err := self.getInput("Ignore: 0x, Normal: 0x1, Severe: 0x2, Critical: 0x3", "New error control: ")
+	svcErrorCtlStr, err := self.getInput("Ignore: 0x0, Normal: 0x1, Severe: 0x2, Critical: 0x3", "New error control: ")
 	if err != nil {
 		self.printf("Error getting service error control: %s\n", err)
 		return
@@ -455,10 +471,6 @@ func scmrChangeServiceConfigFunc(self *shell, argArr interface{}) {
 		self.println(err)
 		return
 	}
-	if err != nil {
-		self.println(err)
-		return
-	}
 
 	self.println("Successfully modified the service!")
 }
@@ -496,7 +508,7 @@ func scmrControlServiceFunc(self *shell, argArr interface{}) {
 		self.println("Not logged in!")
 		return
 	}
-	usage := "Usage: " + usageMap[ScmrGetSvcConfig]
+	usage := "Usage: " + usageMap[ScmrControlService]
 	var name string
 	rpccon, err := self.getScmrHandle()
 	if err != nil {
@@ -522,6 +534,9 @@ func scmrControlServiceFunc(self *shell, argArr interface{}) {
 	case "continue":
 		action = msscmr.ServiceControlContinue
 		verb = "resumed"
+	default:
+		self.printf("Unknown action %q. Valid actions: stop, pause, continue\n", args[1])
+		return
 	}
 	if self.verbose {
 		self.printf("Trying to (%s) service %s\n", args[1], name)
@@ -567,13 +582,13 @@ func scmrCreateServiceFunc(self *shell, argArr interface{}) {
 		self.println("Cannot create a service without a path to a service binary")
 		return
 	}
-	svcTypeStr, err := self.getInput("kernel_driver: 0x1, file_system_driver: 0x2, win32_own_service: 0x10, win32_share_process: 0x20", "Service type (default 0x30): ")
+	svcTypeStr, err := self.getInput("kernel_driver: 0x1, file_system_driver: 0x2, win32_own_service: 0x10, win32_share_process: 0x20", "Service type (default 0x10): ")
 	if err != nil {
 		self.printf("Error getting service type: %s\n", err)
 		return
 	}
 	if svcTypeStr == "" {
-		svcType = 0x30
+		svcType = 0x10
 	} else {
 		val, err = parseNumericArg(svcTypeStr, svcType)
 		if err != nil {
@@ -581,6 +596,10 @@ func scmrCreateServiceFunc(self *shell, argArr interface{}) {
 			return
 		}
 		svcType = val.(uint32)
+	}
+	if svcType&0x30 == 0x30 {
+		self.println("Service type cannot be both win32_own_service and win32_share_process")
+		return
 	}
 	svcStartTypeStr, err := self.getInput("BootStart: 0x0, SystemStart: 0x1, AutoStart: 0x2, DemandStart: 0x3, Disabled: 0x4", "Service start type (default 0x3): ")
 	if err != nil {
@@ -637,7 +656,7 @@ func scmrCreateServiceFunc(self *shell, argArr interface{}) {
 	startService := self.getConfirmation("Start service after creation")
 
 	if self.verbose {
-		self.printf("Trying to create a service with name: %q, type: 0x%x, startType: 0x%x, errorCtl: 0x%x, startName: %q, displayName: %q, and a binPath: %s\n")
+		self.printf("Trying to create a service with name: %q, type: 0x%x, startType: 0x%x, errorCtl: 0x%x, startName: %q, displayName: %q, and a binPath: %s\n", name, svcType, svcStartType, svcErrorControl, svcStartName, svcDisplayName, svcExePath)
 	}
 	err = rpccon.CreateService(name, svcType, svcStartType, svcErrorControl, svcExePath, svcStartName, svcUserPass, svcDisplayName, startService)
 	if err != nil {

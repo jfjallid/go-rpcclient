@@ -26,11 +26,12 @@ import (
 	"os"
 	"strings"
 
+	"github.com/jfjallid/go-smb/dcerpc"
+	"github.com/jfjallid/go-smb/dcerpc/mslsad"
+	"github.com/jfjallid/go-smb/dcerpc/mssrvs"
+	"github.com/jfjallid/go-smb/dcerpc/smbtransport"
 	"github.com/jfjallid/go-smb/msdtyp"
 	"github.com/jfjallid/go-smb/smb"
-	"github.com/jfjallid/go-smb/smb/dcerpc"
-	"github.com/jfjallid/go-smb/smb/dcerpc/mslsad"
-	"github.com/jfjallid/go-smb/smb/dcerpc/mssrvs"
 )
 
 var helpSrvsOptions = `
@@ -204,8 +205,13 @@ func handleSrvs(args *userArgs) (err error) {
 		return
 	}
 	defer f.CloseFile()
+	transport, err := smbtransport.NewSMBTransport(f)
+	if err != nil {
+		log.Errorln(err)
+		return
+	}
 
-	bind, err := dcerpc.Bind(f, mssrvs.MSRPCUuidSrvSvc, mssrvs.MSRPCSrvSvcMajorVersion, mssrvs.MSRPCSrvSvcMinorVersion, dcerpc.MSRPCUuidNdr)
+	bind, err := dcerpc.Bind(transport, mssrvs.MSRPCUuidSrvSvc, mssrvs.MSRPCSrvSvcMajorVersion, mssrvs.MSRPCSrvSvcMinorVersion, dcerpc.MSRPCUuidNdr)
 	if err != nil {
 		log.Errorln("Failed to bind to service")
 		log.Errorln(err)
@@ -224,8 +230,14 @@ func handleSrvs(args *userArgs) (err error) {
 			return
 		}
 		defer f2.CloseFile()
+		transport2, err2 := smbtransport.NewSMBTransport(f2)
+		if err != nil {
+			err = err2
+			log.Errorln(err)
+			return
+		}
 		var bind2 *dcerpc.ServiceBind
-		bind2, err = dcerpc.Bind(f2, mslsad.MSRPCUuidLsaRpc, mslsad.MSRPCLsaRpcMajorVersion, mslsad.MSRPCLsaRpcMinorVersion, dcerpc.MSRPCUuidNdr)
+		bind2, err = dcerpc.Bind(transport2, mslsad.MSRPCUuidLsaRpc, mslsad.MSRPCLsaRpcMajorVersion, mslsad.MSRPCLsaRpcMinorVersion, dcerpc.MSRPCUuidNdr)
 		if err != nil {
 			log.Errorln("Failed to bind to LSARPC service")
 			log.Errorln(err)

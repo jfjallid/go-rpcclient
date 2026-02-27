@@ -29,11 +29,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jfjallid/go-smb/dcerpc"
+	"github.com/jfjallid/go-smb/dcerpc/mslsad"
+	"github.com/jfjallid/go-smb/dcerpc/mssamr"
+	"github.com/jfjallid/go-smb/dcerpc/smbtransport"
 	"github.com/jfjallid/go-smb/msdtyp"
 	"github.com/jfjallid/go-smb/smb"
-	"github.com/jfjallid/go-smb/smb/dcerpc"
-	"github.com/jfjallid/go-smb/smb/dcerpc/mslsad"
-	"github.com/jfjallid/go-smb/smb/dcerpc/mssamr"
 	"github.com/jfjallid/golog"
 	"golang.org/x/term"
 )
@@ -159,7 +160,7 @@ func init() {
 	maps.Copy(descriptionMap, samrDescriptionMap)
 	allKeys = append(allKeys, samrUsageKeys...)
 	cleanupCallbacks = append(cleanupCallbacks, samrCleanup)
-	golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mssamr", "mssamr", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
+	golog.Set("github.com/jfjallid/go-smb/dcerpc/mssamr", "mssamr", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
 	handlers[SamrEnumDomains] = getSamrDomains
 	handlers[SamrEnumUsers] = getSamrUsers
 	handlers[SamrEnumGroups] = getSamrGroups
@@ -197,8 +198,14 @@ func (self *shell) getSamrHandle() (rpccon *mssamr.RPCCon, err error) {
 			return
 		}
 		self.files = append(self.files, f)
+		transport, err2 := smbtransport.NewSMBTransport(f)
+		if err2 != nil {
+			err = err2
+			self.println(err)
+			return
+		}
 		var bind *dcerpc.ServiceBind
-		bind, err = dcerpc.Bind(f, mssamr.MSRPCUuidSamr, mssamr.MSRPCSamrMajorVersion, mssamr.MSRPCSamrMinorVersion, dcerpc.MSRPCUuidNdr)
+		bind, err = dcerpc.Bind(transport, mssamr.MSRPCUuidSamr, mssamr.MSRPCSamrMajorVersion, mssamr.MSRPCSamrMinorVersion, dcerpc.MSRPCUuidNdr)
 		if err != nil {
 			self.println("Failed to bind to service")
 			return
@@ -1060,6 +1067,10 @@ func samrQueryUser(self *shell, argArr interface{}) {
 
 	var info *mssamr.SamprUserAllInformation
 	result, err := rpccon.SamrGetUserInfo2(userHandle, mssamr.UserAllInformation)
+	if err != nil {
+		self.println(err)
+		return
+	}
 	info = result.(*mssamr.SamprUserAllInformation)
 
 	self.printf("Username: %s\nDescription: %s\nUser Rid: %d\nLast Logon: %s\nPassword Last Changed: %s\nPassword Can Change: %s\nUserAcountControl: 0x%x\nBadPwdCount: %d\nLogonCount: %d\nPassword expired: %v\n", info.Username, info.AdminComment, info.UserId, info.LastLogon.ToString(), info.PasswordLastSet.ToString(), info.PasswordCanChange.ToString(), info.UserAccountControl, info.BadPasswordCount, info.LogonCount, info.PasswordExpired)

@@ -26,8 +26,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/jfjallid/go-smb/smb/dcerpc"
-	"github.com/jfjallid/go-smb/smb/dcerpc/msscmr"
+	"github.com/jfjallid/go-smb/dcerpc"
+	"github.com/jfjallid/go-smb/dcerpc/msscmr"
+	"github.com/jfjallid/go-smb/dcerpc/smbtransport"
 )
 
 const validServiceTypes uint64 = 0x1 | 0x2 | 0x10 | 0x20
@@ -209,8 +210,13 @@ func handleScmr(args *userArgs) (err error) {
 		return
 	}
 	defer f.CloseFile()
+	transport, err := smbtransport.NewSMBTransport(f)
+	if err != nil {
+		log.Errorln(err)
+		return
+	}
 
-	bind, err := dcerpc.Bind(f, msscmr.MSRPCUuidSvcCtl, msscmr.MSRPCSvcCtlMajorVersion, msscmr.MSRPCSvcCtlMinorVersion, dcerpc.MSRPCUuidNdr)
+	bind, err := dcerpc.Bind(transport, msscmr.MSRPCUuidSvcCtl, msscmr.MSRPCSvcCtlMajorVersion, msscmr.MSRPCSvcCtlMinorVersion, dcerpc.MSRPCUuidNdr)
 	if err != nil {
 		log.Errorln("Failed to bind to service")
 		log.Errorln(err)

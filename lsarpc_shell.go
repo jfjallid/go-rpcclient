@@ -26,10 +26,11 @@ import (
 	"maps"
 	"strings"
 
+	"github.com/jfjallid/go-smb/dcerpc"
+	"github.com/jfjallid/go-smb/dcerpc/mslsad"
+	"github.com/jfjallid/go-smb/dcerpc/smbtransport"
 	"github.com/jfjallid/go-smb/msdtyp"
 	"github.com/jfjallid/go-smb/smb"
-	"github.com/jfjallid/go-smb/smb/dcerpc"
-	"github.com/jfjallid/go-smb/smb/dcerpc/mslsad"
 	"github.com/jfjallid/golog"
 )
 
@@ -88,7 +89,7 @@ func init() {
 	maps.Copy(usageMap, lsadUsageMap)
 	maps.Copy(descriptionMap, lsadDescriptionMap)
 	allKeys = append(allKeys, lsadUsageKeys...)
-	golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mslsad", "mslsad", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
+	golog.Set("github.com/jfjallid/go-smb/dcerpc/mslsad", "mslsad", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
 	handlers[LsadEnumAccounts] = getLSAAccount
 	handlers[LsadEnumAccRights] = getLSAAccountRights
 	handlers[LsadAddRights] = addLSAAccountRights
@@ -114,8 +115,14 @@ func (self *shell) getLsadHandle() (rpccon *mslsad.RPCCon, err error) {
 			return
 		}
 		self.files = append(self.files, f)
+		transport, err2 := smbtransport.NewSMBTransport(f)
+		if err2 != nil {
+			err = err2
+			self.println(err)
+			return
+		}
 		var bind *dcerpc.ServiceBind
-		bind, err = dcerpc.Bind(f, mslsad.MSRPCUuidLsaRpc, mslsad.MSRPCLsaRpcMajorVersion, mslsad.MSRPCLsaRpcMinorVersion, dcerpc.MSRPCUuidNdr)
+		bind, err = dcerpc.Bind(transport, mslsad.MSRPCUuidLsaRpc, mslsad.MSRPCLsaRpcMajorVersion, mslsad.MSRPCLsaRpcMinorVersion, dcerpc.MSRPCUuidNdr)
 		if err != nil {
 			self.println("Failed to bind to service")
 			return

@@ -28,11 +28,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jfjallid/go-smb/dcerpc"
+	"github.com/jfjallid/go-smb/dcerpc/mslsad"
+	"github.com/jfjallid/go-smb/dcerpc/mssamr"
+	"github.com/jfjallid/go-smb/dcerpc/smbtransport"
 	"github.com/jfjallid/go-smb/msdtyp"
 	"github.com/jfjallid/go-smb/smb"
-	"github.com/jfjallid/go-smb/smb/dcerpc"
-	"github.com/jfjallid/go-smb/smb/dcerpc/mslsad"
-	"github.com/jfjallid/go-smb/smb/dcerpc/mssamr"
 	"golang.org/x/term"
 )
 
@@ -142,7 +143,7 @@ func getSamrNetbiosDomain(rpccon *mssamr.RPCCon, handle *mssamr.SamrHandle) (net
 		}
 	}
 	if len(otherDomains) != 1 {
-		err = fmt.Errorf("Failed to automatically identity the Netbios domain. Select the correct domain and use it as an argument from the available domains: %v\n", domains)
+		err = fmt.Errorf("Failed to automatically identify the Netbios domain. Select the correct domain and use it as an argument from the available domains: %v\n", domains)
 		return
 	}
 	netbiosName = strings.ToLower(otherDomains[0])
@@ -372,8 +373,13 @@ func handleSamr(args *userArgs) (err error) {
 		return
 	}
 	defer f.CloseFile()
+	transport, err := smbtransport.NewSMBTransport(f)
+	if err != nil {
+		log.Errorln(err)
+		return
+	}
 
-	bind, err := dcerpc.Bind(f, mssamr.MSRPCUuidSamr, mssamr.MSRPCSamrMajorVersion, mssamr.MSRPCSamrMinorVersion, dcerpc.MSRPCUuidNdr)
+	bind, err := dcerpc.Bind(transport, mssamr.MSRPCUuidSamr, mssamr.MSRPCSamrMajorVersion, mssamr.MSRPCSamrMinorVersion, dcerpc.MSRPCUuidNdr)
 	if err != nil {
 		log.Errorln("Failed to bind to service")
 		log.Errorln(err)
@@ -392,8 +398,14 @@ func handleSamr(args *userArgs) (err error) {
 			return
 		}
 		defer f2.CloseFile()
+		transport2, err2 := smbtransport.NewSMBTransport(f2)
+		if err != nil {
+			err = err2
+			log.Errorln(err)
+			return
+		}
 		var bind2 *dcerpc.ServiceBind
-		bind2, err = dcerpc.Bind(f2, mslsad.MSRPCUuidLsaRpc, mslsad.MSRPCLsaRpcMajorVersion, mslsad.MSRPCLsaRpcMinorVersion, dcerpc.MSRPCUuidNdr)
+		bind2, err = dcerpc.Bind(transport2, mslsad.MSRPCUuidLsaRpc, mslsad.MSRPCLsaRpcMajorVersion, mslsad.MSRPCLsaRpcMinorVersion, dcerpc.MSRPCUuidNdr)
 		if err != nil {
 			log.Errorln("Failed to bind to LSARPC service")
 			log.Errorln(err)

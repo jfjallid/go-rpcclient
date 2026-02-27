@@ -25,8 +25,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jfjallid/go-smb/smb/dcerpc"
-	"github.com/jfjallid/go-smb/smb/dcerpc/mswkst"
+	"github.com/jfjallid/go-smb/dcerpc"
+	"github.com/jfjallid/go-smb/dcerpc/mswkst"
+	"github.com/jfjallid/go-smb/dcerpc/smbtransport"
 )
 
 var helpWkstOptions = `
@@ -104,7 +105,12 @@ func handleWkst(args *userArgs) (err error) {
 	}
 	defer f.CloseFile()
 
-	bind, err := dcerpc.Bind(f, mswkst.MSRPCUuidWksSvc, mswkst.MSRPCWksSvcMajorVersion, mswkst.MSRPCWksSvcMinorVersion, dcerpc.MSRPCUuidNdr)
+	transport, err := smbtransport.NewSMBTransport(f)
+	if err != nil {
+		log.Errorln(err)
+		return
+	}
+	bind, err := dcerpc.Bind(transport, mswkst.MSRPCUuidWksSvc, mswkst.MSRPCWksSvcMajorVersion, mswkst.MSRPCWksSvcMinorVersion, dcerpc.MSRPCUuidNdr)
 	if err != nil {
 		log.Errorln("Failed to bind to service")
 		log.Errorln(err)

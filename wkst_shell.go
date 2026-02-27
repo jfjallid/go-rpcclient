@@ -26,9 +26,10 @@ import (
 	"maps"
 	"strconv"
 
+	"github.com/jfjallid/go-smb/dcerpc"
+	"github.com/jfjallid/go-smb/dcerpc/mswkst"
+	"github.com/jfjallid/go-smb/dcerpc/smbtransport"
 	"github.com/jfjallid/go-smb/smb"
-	"github.com/jfjallid/go-smb/smb/dcerpc"
-	"github.com/jfjallid/go-smb/smb/dcerpc/mswkst"
 	"github.com/jfjallid/golog"
 )
 
@@ -55,7 +56,7 @@ func init() {
 	maps.Copy(usageMap, wkstUsageMap)
 	maps.Copy(descriptionMap, wkstDescriptionMap)
 	allKeys = append(allKeys, wkstUsageKeys...)
-	golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/mswkst", "mswkst", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
+	golog.Set("github.com/jfjallid/go-smb/dcerpc/mswkst", "mswkst", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
 	handlers[WkstEnumSessions] = getSessionsFunc
 	helpFunctions[2] = printWkstHelp
 }
@@ -72,8 +73,14 @@ func (self *shell) getWkstHandle() (rpccon *mswkst.RPCCon, err error) {
 			return
 		}
 		self.files = append(self.files, f)
+		transport, err2 := smbtransport.NewSMBTransport(f)
+		if err2 != nil {
+			err = err2
+			self.println(err)
+			return
+		}
 		var bind *dcerpc.ServiceBind
-		bind, err = dcerpc.Bind(f, mswkst.MSRPCUuidWksSvc, mswkst.MSRPCWksSvcMajorVersion, mswkst.MSRPCWksSvcMinorVersion, dcerpc.MSRPCUuidNdr)
+		bind, err = dcerpc.Bind(transport, mswkst.MSRPCUuidWksSvc, mswkst.MSRPCWksSvcMajorVersion, mswkst.MSRPCWksSvcMinorVersion, dcerpc.MSRPCUuidNdr)
 		if err != nil {
 			self.println("Failed to bind to service")
 			return

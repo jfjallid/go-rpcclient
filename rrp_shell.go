@@ -28,10 +28,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jfjallid/go-smb/dcerpc"
+	"github.com/jfjallid/go-smb/dcerpc/msrrp"
+	"github.com/jfjallid/go-smb/dcerpc/smbtransport"
 	"github.com/jfjallid/go-smb/msdtyp"
 	"github.com/jfjallid/go-smb/smb"
-	"github.com/jfjallid/go-smb/smb/dcerpc"
-	"github.com/jfjallid/go-smb/smb/dcerpc/msrrp"
 	"github.com/jfjallid/golog"
 )
 
@@ -112,7 +113,7 @@ func init() {
 	maps.Copy(descriptionMap, rrpDescriptionMap)
 	allKeys = append(allKeys, rrpUsageKeys...)
 	cleanupCallbacks = append(cleanupCallbacks, rrpCleanup)
-	golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
+	golog.Set("github.com/jfjallid/go-smb/dcerpc/msrrp", "msrrp", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
 	handlers[RegGetValue] = regGetValueFunc
 	handlers[RegSetValue] = regSetValueFunc
 	handlers[RegDeleteValue] = regDeleteValueFunc
@@ -139,8 +140,14 @@ func (self *shell) getRrpHandle() (rpccon *msrrp.RPCCon, err error) {
 			return
 		}
 		self.files = append(self.files, f)
+		transport, err2 := smbtransport.NewSMBTransport(f)
+		if err2 != nil {
+			err = err2
+			self.println(err)
+			return
+		}
 		var bind *dcerpc.ServiceBind
-		bind, err = dcerpc.Bind(f, msrrp.MSRRPUuid, msrrp.MSRRPMajorVersion, msrrp.MSRRPMinorVersion, dcerpc.MSRPCUuidNdr)
+		bind, err = dcerpc.Bind(transport, msrrp.MSRRPUuid, msrrp.MSRRPMajorVersion, msrrp.MSRRPMinorVersion, dcerpc.MSRPCUuidNdr)
 		if err != nil {
 			self.println("Failed to bind to service")
 			return

@@ -27,10 +27,11 @@ import (
 	"os"
 	"strings"
 
+	"github.com/jfjallid/go-smb/dcerpc"
+	"github.com/jfjallid/go-smb/dcerpc/msrrp"
+	"github.com/jfjallid/go-smb/dcerpc/smbtransport"
 	"github.com/jfjallid/go-smb/msdtyp"
 	"github.com/jfjallid/go-smb/smb"
-	"github.com/jfjallid/go-smb/smb/dcerpc"
-	"github.com/jfjallid/go-smb/smb/dcerpc/msrrp"
 )
 
 var helpRRPOptions = `
@@ -119,7 +120,7 @@ func getKeyValue(rpccon *msrrp.RPCCon, hKeyBase []byte, regKeyPath, valueName st
 func setKeyValue(rpccon *msrrp.RPCCon, hKeyBase []byte, regKeyPath, valueName string, dataValue any, dataType, keyOptions uint32) (err error) {
 	var hKey []byte
 	if regKeyPath != "" {
-		hKey, err = rpccon.OpenSubKeyExt(hKeyBase, regKeyPath, dataType, 0)
+		hKey, err = rpccon.OpenSubKeyExt(hKeyBase, regKeyPath, keyOptions, 0)
 		if err != nil {
 			log.Errorln(err)
 			return
@@ -437,8 +438,13 @@ func handleRrp(args *userArgs) (err error) {
 		return
 	}
 	defer f.CloseFile()
+	transport, err := smbtransport.NewSMBTransport(f)
+	if err != nil {
+		log.Errorln(err)
+		return
+	}
 
-	bind, err := dcerpc.Bind(f, msrrp.MSRRPUuid, msrrp.MSRRPMajorVersion, msrrp.MSRRPMinorVersion, dcerpc.MSRPCUuidNdr)
+	bind, err := dcerpc.Bind(transport, msrrp.MSRRPUuid, msrrp.MSRRPMajorVersion, msrrp.MSRRPMinorVersion, dcerpc.MSRPCUuidNdr)
 	if err != nil {
 		log.Errorln("Failed to bind to service")
 		log.Errorln(err)

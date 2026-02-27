@@ -34,9 +34,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jfjallid/go-smb/dcerpc/mssamr"
 	"github.com/jfjallid/go-smb/msdtyp"
 	"github.com/jfjallid/go-smb/smb"
-	"github.com/jfjallid/go-smb/smb/dcerpc/mssamr"
 	"github.com/jfjallid/go-smb/spnego"
 	"github.com/jfjallid/golog"
 	"golang.org/x/term"
@@ -85,9 +85,9 @@ const (
 
 var usageMap = map[string]string{
 	OpenConn:          OpenConn + " <host> [port]",
-	Login:             Login + "[domain/username] [passwd]",
-	LoginHash:         LoginHash + "[domain/username] [nthash]",
-	LoginKrb:          LoginKrb + "[domain/username] [pw] [spn]",
+	Login:             Login + " [domain/username] [passwd]",
+	LoginHash:         LoginHash + " [domain/username] [nthash]",
+	LoginKrb:          LoginKrb + " [domain/username] [pw] [spn]",
 	Logout:            Logout,
 	CloseConn:         CloseConn,
 	ExitShell:         ExitShell,
@@ -551,7 +551,11 @@ func loginKerberosFunc(self *shell, argArr interface{}) {
 		} else {
 			spn = "cifs/" + self.options.smbOptions.Host
 		}
-		self.options.c.SetInitiator(&spnego.KRB5Initiator{SPN: spn, DCIP: self.dcip})
+		err = self.options.c.SetInitiator(&spnego.KRB5Initiator{SPN: spn, DCIP: self.dcip})
+		if err != nil {
+			self.println(err)
+			return
+		}
 	} else {
 		userdomain := args[0]
 		domain := ""
@@ -630,7 +634,7 @@ func loginKerberosFunc(self *shell, argArr interface{}) {
 
 func closeAllBinds(self *shell) error {
 	// Do some cleanup before logging out
-	// Call registred cleanup functions
+	// Call registered cleanup functions
 	for _, fn := range cleanupCallbacks {
 		fn(self)
 	}
@@ -665,7 +669,9 @@ func logoutFunc(self *shell, argArr interface{}) {
 		return
 	}
 
-	logout(self)
+	if err := logout(self); err != nil {
+		self.println(err)
+	}
 	return
 }
 
@@ -737,7 +743,7 @@ func (self *shell) cmdloop() {
 	golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
 	golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
 	golog.Set("github.com/jfjallid/go-smb/msdtyp", "msdtyp", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
-	golog.Set("github.com/jfjallid/go-smb/smb/dcerpc", "dcerpc", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
+	golog.Set("github.com/jfjallid/go-smb/dcerpc", "dcerpc", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
 	golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
 	golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
 	log.SetLogLevel(golog.LevelNone)

@@ -35,7 +35,7 @@ import (
 )
 
 var helpRRPOptions = `
-    Usage: ` + os.Args[0] + ` --rrp [options] <action>
+    Usage: ` + os.Args[0] + ` rrp [options] <action>
     ` + helpConnectionOptions + `
     Action:
           --get-value        Retrive registry value --name for --key
@@ -317,6 +317,22 @@ func saveRegKey(rpccon *msrrp.RPCCon, hKeyBase []byte, regKeyPath, remotePath, o
 	return
 }
 
+func validateRrpActions(args *userArgs) error {
+	return exactlyOneAction(
+		args.getKeyValue,
+		args.setKeyValue,
+		args.deleteValue,
+		args.deleteKey,
+		args.createKey,
+		args.saveKey,
+		args.enumKeys,
+		args.enumValues,
+		args.getKeyInfo,
+		args.getKeySecurity,
+		args.setKeySecurity,
+	)
+}
+
 func handleRrp(args *userArgs) (err error) {
 	var hive byte
 	var hiveStr string
@@ -324,49 +340,12 @@ func handleRrp(args *userArgs) (err error) {
 	var dataType uint32
 	var dataValue any
 	var openCreateKeyOptions uint32
-	numActions := 0
-	if args.getKeyValue {
-		numActions++
-	}
-	if args.setKeyValue {
-		numActions++
-	}
-	if args.deleteValue {
-		numActions++
-	}
-	if args.deleteKey {
-		numActions++
-	}
-	if args.createKey {
-		numActions++
-	}
 	if args.saveKey {
 		if args.remotePath == "" {
 			fmt.Println("Must specify --remote-path to save the registry key to")
 			flags.Usage()
 			return
 		}
-		numActions++
-	}
-	if args.enumKeys {
-		numActions++
-	}
-	if args.enumValues {
-		numActions++
-	}
-	if args.getKeyInfo {
-		numActions++
-	}
-	if args.getKeySecurity {
-		numActions++
-	}
-	if args.setKeySecurity {
-		numActions++
-	}
-	if numActions != 1 {
-		fmt.Println("Must specify ONE action. No more, no less")
-		flags.Usage()
-		return
 	}
 	if args.key == "" {
 		fmt.Println("Must specify a registry key path")
@@ -392,7 +371,7 @@ func handleRrp(args *userArgs) (err error) {
 		}
 		if isFlagSet("binary-val") {
 			dataType = msrrp.RegBinary
-			dataValue = args.binaryValue
+			dataValue = []byte(args.binaryValue)
 			numValues++
 		}
 		if numValues != 1 {
@@ -417,6 +396,10 @@ func handleRrp(args *userArgs) (err error) {
 	err = makeConnection(&args.connArgs)
 	if err != nil {
 		log.Errorln(err)
+		return
+	}
+	if args.opts == nil || args.opts.c == nil {
+		err = fmt.Errorf("failed to establish connection to server")
 		return
 	}
 	conn := args.opts.c

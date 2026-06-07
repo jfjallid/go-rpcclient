@@ -56,11 +56,13 @@ const (
 	SamrDelGroupMember   = "samrdelgroupmember"
 	SamrDelAliasMember   = "samrdelaliasmember"
 	SamrCreateUser       = "samrcreateuser"
+	SamrCreateComputer   = "samrcreatecomputer"
 	SamrQueryUser        = "samrqueryuser"
 	SamrDeleteUser       = "samrdeleteuser"
 	SamrMakeAdmin        = "samrmakeadmin"
 	SamrChangePassword   = "samrchangepassword"
 	SamrResetPassword    = "samrresetpassword"
+	SamrLookupNames      = "samrlookupnames"
 )
 
 var samrUsageKeys = []string{
@@ -72,6 +74,7 @@ var samrUsageKeys = []string{
 	SamrLookupDomain,
 	SamrLookupSid,
 	SamrLookupRids,
+	SamrLookupNames,
 	SamrListGroupMembers,
 	SamrListAliasMembers,
 	SamrListLocalAdmins,
@@ -80,6 +83,7 @@ var samrUsageKeys = []string{
 	SamrDelGroupMember,
 	SamrDelAliasMember,
 	SamrCreateUser,
+	SamrCreateComputer,
 	SamrQueryUser,
 	SamrDeleteUser,
 	SamrMakeAdmin,
@@ -96,6 +100,7 @@ var samrUsageMap = map[string]string{
 	SamrLookupDomain:     SamrLookupDomain + " <domain>",
 	SamrLookupSid:        SamrLookupSid + " <domain> <RID>",
 	SamrLookupRids:       SamrLookupRids + " <RID[,RID...]> [domain]",
+	SamrLookupNames:      SamrLookupNames + " <name[,name...]> [domain]",
 	SamrListGroupMembers: SamrListGroupMembers + " <RID> [domain]",
 	SamrListAliasMembers: SamrListAliasMembers + " <RID> [domain]",
 	SamrListLocalAdmins:  SamrListLocalAdmins,
@@ -109,6 +114,7 @@ var samrUsageMap = map[string]string{
 	SamrChangePassword:   SamrChangePassword + " <samAccountName>",
 	SamrResetPassword:    SamrResetPassword + " <RID|SID> [domain]",
 	SamrCreateUser:       SamrCreateUser + " <name> [domain]",
+	SamrCreateComputer:   SamrCreateComputer + " <name> [domain]",
 }
 
 var samrDescriptionMap = map[string]string{
@@ -120,6 +126,7 @@ var samrDescriptionMap = map[string]string{
 	SamrLookupDomain:     "Lookup Samr domain name to SID",
 	SamrLookupSid:        "Convert RID to SID in domain",
 	SamrLookupRids:       "Convert list of RIDs to names in domain",
+	SamrLookupNames:      "Convert list of names to RIDs in domain",
 	SamrListGroupMembers: "List group members",
 	SamrListAliasMembers: "List alias members",
 	SamrListLocalAdmins:  "List local admins",
@@ -133,6 +140,7 @@ var samrDescriptionMap = map[string]string{
 	SamrChangePassword:   "Change user password. Leave current password empty to supply NT Hash instead",
 	SamrResetPassword:    "Force change a user's password",
 	SamrCreateUser:       "Create Samr user",
+	SamrCreateComputer:   "Create Samr computer (machine) account",
 }
 
 func samrCleanup(self *shell) {
@@ -146,7 +154,7 @@ func samrCleanup(self *shell) {
 			}
 		}
 	}
-	for i, _ := range self.samrDomainIds {
+	for i := range self.samrDomainIds {
 		delete(self.binds, i)
 	}
 }
@@ -169,6 +177,7 @@ func init() {
 	handlers[SamrLookupDomain] = samrLookupDomain
 	handlers[SamrLookupSid] = samrLookupSid
 	handlers[SamrLookupRids] = samrLookupRids
+	handlers[SamrLookupNames] = samrLookupNames
 	handlers[SamrListGroupMembers] = listGroupMembers
 	handlers[SamrListAliasMembers] = listAliasMembers
 	handlers[SamrListLocalAdmins] = listLocalAdmins
@@ -182,6 +191,7 @@ func init() {
 	handlers[SamrChangePassword] = samrChangeUserPassword
 	handlers[SamrResetPassword] = samrResetUserPassword
 	handlers[SamrCreateUser] = samrCreateUser
+	handlers[SamrCreateComputer] = samrCreateComputer
 	helpFunctions[4] = printSamrHelp
 }
 
@@ -333,7 +343,7 @@ func getSamrUsers(self *shell, argArr interface{}) {
 	}
 	self.println("Listing up to a max of about 30 users:")
 	for _, user := range users {
-		self.printf("Rid: %d, Name: %s\n", user.RelativeId, user.Name)
+		self.printf("Rid: %d, Name: %s\n", user.RelativeId, user.Name.Value)
 	}
 }
 
@@ -378,7 +388,7 @@ func getSamrGroups(self *shell, argArr interface{}) {
 	}
 	self.println("Groups:")
 	for _, group := range groups {
-		self.printf("Rid: %d, Name: %s\n", group.RelativeId, group.Name)
+		self.printf("Rid: %d, Name: %s\n", group.RelativeId, group.Name.Value)
 	}
 }
 
@@ -409,7 +419,7 @@ func getSamrAliases(self *shell, argArr interface{}) {
 
 	self.println("Aliases:")
 	for _, group := range groups {
-		self.printf("Rid: %d, Name: %s\n", group.RelativeId, group.Name)
+		self.printf("Rid: %d, Name: %s\n", group.RelativeId, group.Name.Value)
 	}
 }
 
@@ -598,7 +608,7 @@ func addLocalGroupMember(self *shell, argArr interface{}) {
 		self.println(err)
 		return
 	}
-	self.println("Added user to group")
+	self.println("Member added to group")
 }
 
 func removeLocalGroupMember(self *shell, argArr interface{}) {
@@ -663,7 +673,7 @@ func removeLocalGroupMember(self *shell, argArr interface{}) {
 		self.println(err)
 		return
 	}
-	self.println("Removed user from group")
+	self.println("Member removed from group")
 }
 
 func samrTranslateSid(self *shell, argArr interface{}) {
@@ -850,7 +860,7 @@ func addMemberToLocalAlias(self *shell, argArr interface{}) {
 		self.println(err)
 		return
 	}
-	self.println("Added member to alias")
+	self.println("Member added to alias")
 }
 
 func removeMemberFromLocalAlias(self *shell, argArr interface{}) {
@@ -909,7 +919,7 @@ func removeMemberFromLocalAlias(self *shell, argArr interface{}) {
 		self.println(err)
 		return
 	}
-	self.println("Removed member from alias")
+	self.println("Member removed from alias")
 }
 
 func listLocalAdmins(self *shell, argArr interface{}) {
@@ -1066,14 +1076,13 @@ func samrQueryUser(self *shell, argArr interface{}) {
 	}
 
 	var info *mssamr.SamprUserAllInformation
-	result, err := rpccon.SamrGetUserInfo2(userHandle, mssamr.UserAllInformation)
+	info, err = rpccon.SamrGetUserInfo2(userHandle, mssamr.UserAllInformation)
 	if err != nil {
 		self.println(err)
 		return
 	}
-	info = result.(*mssamr.SamprUserAllInformation)
 
-	self.printf("Username: %s\nDescription: %s\nUser Rid: %d\nLast Logon: %s\nPassword Last Changed: %s\nPassword Can Change: %s\nUserAcountControl: 0x%x\nBadPwdCount: %d\nLogonCount: %d\nPassword expired: %v\n", info.Username, info.AdminComment, info.UserId, info.LastLogon.ToString(), info.PasswordLastSet.ToString(), info.PasswordCanChange.ToString(), info.UserAccountControl, info.BadPasswordCount, info.LogonCount, info.PasswordExpired)
+	self.printf("Username: %s\nDescription: %s\nUser Rid: %d\nLast Logon: %s\nPassword Last Changed: %s\nPassword Can Change: %s\nUserAcountControl: 0x%x\nBadPwdCount: %d\nLogonCount: %d\nPassword expired: %v\n", info.Username.Value, info.AdminComment.Value, info.UserId, info.LastLogon.ToString(), info.PasswordLastSet.ToString(), info.PasswordCanChange.ToString(), info.UserAccountControl, info.BadPasswordCount, info.LogonCount, info.PasswordExpired)
 }
 
 func samrCreateUser(self *shell, argArr interface{}) {
@@ -1198,6 +1207,7 @@ func samrDeleteUser(self *shell, argArr interface{}) {
 		self.println(err)
 		return
 	}
+	self.println("User deleted!")
 }
 
 func samrResetUserPassword(self *shell, argArr interface{}) {
@@ -1417,4 +1427,126 @@ func samrLookupRids(self *shell, argArr interface{}) {
 	for _, item := range items {
 		self.printf("Name: %s, RID: %d, Use: %s\n", item.Name, item.RID, mssamr.SidType[item.Use])
 	}
+}
+
+func samrLookupNames(self *shell, argArr interface{}) {
+	if !self.authenticated {
+		self.println("Not logged in!")
+		return
+	}
+	usage := "Usage: " + usageMap[SamrLookupNames]
+
+	var domainName string
+	args := argArr.([]string)
+	if len(args) < 1 {
+		self.println(usage)
+		return
+	} else if len(args) > 1 {
+		domainName = strings.ToLower(args[1])
+	}
+
+	names := strings.Split(args[0], ",")
+	if len(names) == 0 {
+		self.println("Must provide at least one name to lookup")
+		self.println(usage)
+		return
+	}
+	rpccon, err := self.getSamrHandle()
+	if err != nil {
+		self.println(err)
+		return
+	}
+
+	domainHandle, err := self.getSamrDomainHandle(rpccon, domainName)
+	if err != nil {
+		self.println(err)
+		self.println(usage)
+		return
+	}
+	var items []mssamr.SamrRidMapping
+	items, err = lookupNamesInDomain(rpccon, domainHandle, names)
+	if err != nil {
+		self.println(err)
+		return
+	}
+	self.println("Translated Names:")
+	for _, item := range items {
+		self.printf("Name: %s, RID: %d, Use: %s\n", item.Name, item.RID, mssamr.SidType[item.Use])
+	}
+}
+
+func samrCreateComputer(self *shell, argArr interface{}) {
+	if !self.authenticated {
+		self.println("Not logged in!")
+		return
+	}
+	usage := "Usage: " + usageMap[SamrCreateComputer]
+
+	domainName := ""
+	args := argArr.([]string)
+	if len(args) < 1 {
+		self.println(usage)
+		return
+	} else if len(args) > 1 {
+		domainName = strings.ToLower(args[1])
+	}
+	name := args[0]
+	if !strings.HasSuffix(name, "$") {
+		name += "$"
+	}
+	rpccon, err := self.getSamrHandle()
+	if err != nil {
+		self.println(err)
+		return
+	}
+	domainHandle, err := self.getSamrDomainHandle(rpccon, domainName)
+	if err != nil {
+		self.println(err)
+		self.println(usage)
+		return
+	}
+	if domainName == "" {
+		domainName, err = self.getSamrNetbiosDomain()
+		if err != nil {
+			self.println(err)
+			return
+		}
+	}
+	domainId, found := self.samrDomainIds[domainName]
+	if !found {
+		self.printf("Something weird going on. DomainSid for %s should be cached already\n", domainName)
+		return
+	}
+
+	accountHandle, accountRid, err := rpccon.SamrCreateUser2InDomain(domainHandle, name, mssamr.UserWorkstationTrustAccount, 0)
+	if err != nil {
+		self.println(err)
+		return
+	}
+	defer rpccon.SamrCloseHandle(accountHandle)
+	accountSid := fmt.Sprintf("%s-%d", domainId.ToString(), accountRid)
+	self.printf("Created computer account %s with SID: %s\n", name, accountSid)
+
+	self.printf("Enter computer account password: ")
+	passBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	self.println()
+	if err != nil {
+		self.println(err)
+		return
+	}
+	userPassword := string(passBytes)
+	if userPassword == "" {
+		self.println("Account will probably not be useable until a password has been set")
+		return
+	}
+	input := &mssamr.SamrUserInfoInput{
+		NewPassword:        userPassword,
+		UserAccountControl: mssamr.UserWorkstationTrustAccount | mssamr.UserDontExpirePassword,
+	}
+	err = rpccon.SamrSetUserInfo2(accountHandle, input)
+	if err != nil {
+		self.println(err)
+		return
+	}
+	self.printf("Password updated for %s\n", name)
 }

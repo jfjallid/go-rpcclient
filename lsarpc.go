@@ -32,7 +32,7 @@ import (
 )
 
 var helpLsadOptions = `
-    Usage: ` + os.Args[0] + ` --lsad [options] <action>
+    Usage: ` + os.Args[0] + ` lsad [options] <action>
     ` + helpConnectionOptions + `
     Action:
           --enum-accounts       List LSA accounts
@@ -44,6 +44,7 @@ var helpLsadOptions = `
           --lookup-sids         Attempts to translate the sids specified by --sids to names
           --lookup-names        Attempts to translate the sids specified by --names to sids
           --whoami              Get the identity of the authenticated user
+          --create-account      Add LSA account specified by --sid
 
     LSA options:
           --sid    <SID>        Target SID of format "S-1-5-...-...-..."
@@ -65,43 +66,24 @@ func getLSAAccounts(rpccon *mslsad.RPCCon) (accounts []string, err error) {
 	return
 }
 
-func handleLsaRpc(args *userArgs) (err error) {
-	numActions := 0
-	if args.enumAccounts {
-		numActions++
-	}
-	if args.enumRights {
-		numActions++
-	}
-	if args.addRights {
-		numActions++
-	}
-	if args.removeRights {
-		numActions++
-	}
-	if args.purgeRights {
-		numActions++
-	}
-	if args.getDomainInfo {
-		numActions++
-	}
-	if args.getUserName {
-		numActions++
-	}
-	if args.lookupSids {
-		numActions++
-	}
-	if args.lookupNames {
-		numActions++
-	}
-	if numActions != 1 {
-		fmt.Println("Must specify ONE action. No more, no less")
-		flags.Usage()
-		return
-	}
+func validateLsadActions(args *userArgs) error {
+	return exactlyOneAction(
+		args.enumAccounts,
+		args.enumRights,
+		args.addRights,
+		args.removeRights,
+		args.purgeRights,
+		args.getDomainInfo,
+		args.getUserName,
+		args.lookupSids,
+		args.lookupNames,
+		args.createAccount,
+	)
+}
 
-	if (args.addRights || args.removeRights || args.enumRights || args.purgeRights) && (args.sid.v == nil) {
-		fmt.Println("Must specify --sid argument to list, add, remove or purge rights")
+func handleLsaRpc(args *userArgs) (err error) {
+	if (args.addRights || args.removeRights || args.enumRights || args.purgeRights || args.createAccount) && (args.sid.v == nil) {
+		fmt.Println("Must specify --sid argument to list, add, remove or purge rights or to create an account")
 		flags.Usage()
 		return
 	}
@@ -122,6 +104,10 @@ func handleLsaRpc(args *userArgs) (err error) {
 	err = makeConnection(&args.connArgs)
 	if err != nil {
 		log.Errorln(err)
+		return
+	}
+	if args.opts == nil || args.opts.c == nil {
+		err = fmt.Errorf("failed to establish connection to server")
 		return
 	}
 	conn := args.opts.c
@@ -251,7 +237,7 @@ func handleLsaRpc(args *userArgs) (err error) {
 			log.Errorln(err)
 			return
 		}
-		fmt.Printf("Domain: %s, SID: %s\n", domInfo.Name, domInfo.Sid.ToString())
+		fmt.Printf("Domain: %s, SID: %s\n", domInfo.Name.String(), domInfo.Sid.ToString())
 	} else if args.enumRights {
 		if args.systemRights {
 			fmt.Printf("Enumerating system rights for SID: %s\n", args.sid.s)
@@ -307,6 +293,22 @@ func handleLsaRpc(args *userArgs) (err error) {
 			return
 		}
 		fmt.Println("Rights removed!")
+	} else if args.createAccount {
+		var accountHandle, policyHandle []byte
+		policyHandle, err = rpccon.LsarOpenPolicy2("")
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+		defer rpccon.LsarCloseHandle(policyHandle)
+
+		accountHandle, err = rpccon.LsarCreateAccount(policyHandle, args.sid.s, 0)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+		rpccon.LsarCloseHandle(accountHandle)
+		fmt.Println("Account created!")
 	}
 	return
 }

@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -37,27 +38,30 @@ import (
 	"golang.org/x/net/proxy"
 	"golang.org/x/term"
 
+	"github.com/jfjallid/go-smb/dcerpc/msscmr"
 	"github.com/jfjallid/go-smb/msdtyp"
+	"github.com/jfjallid/go-smb/relay"
 	"github.com/jfjallid/go-smb/smb"
 	"github.com/jfjallid/go-smb/spnego"
 	"github.com/jfjallid/golog"
 )
 
-var log = golog.Get("")
-var release string = "0.3.0"
+var log = golog.Get("main")
+var release string = "0.4.0"
 var flags *flag.FlagSet
 
 var helpMsg = `
     Usage: ` + os.Args[0] + ` <service> [options]
 
     <service>:
-          --lsad                Interact with the Local Security Authority
-          --samr                Interact with the Security Account Manager
-          --wkst                Interact with the Workstation Service
-          --srvs                Interact with the Server Service
-          --scmr                Interact with the Service Control Manager
-          --rrp                 Interact with the Remote Registry
-      -i, --interactive         Launch interactive mode
+          lsad                  Interact with the Local Security Authority
+          samr                  Interact with the Security Account Manager
+          wkst                  Interact with the Workstation Service
+          srvs                  Interact with the Server Service
+          scmr                  Interact with the Service Control Manager
+          rrp                   Interact with the Remote Registry
+          smb                   Read file security descriptors directly over SMB
+          interactive           Launch interactive mode (aliases: shell, -i)
       ` + helpConnectionOptions + `
 `
 var helpConnectionOptions = `
@@ -87,8 +91,14 @@ var helpConnectionOptions = `
           --socks-port <port>    SOCKS5 proxy port (default 1080)
           --noenc                Disable smb encryption
           --smb2                 Force smb 2.1
-          --debug                Enable debug logging
-          --verbose              Enable verbose logging
+          --debug                Enable debug logging. Bare --debug turns on every registered package;
+                                   --debug=smb,relay,dcerpc/server turns on only the listed package-name suffixes
+                                   (the '=' form is required for the filter).
+          --verbose              Enable verbose logging. Same filter syntax as --debug.
+                                   --debug and --verbose may be combined with different filters;
+                                   a package targeted by both gets the higher level.
+          --list-log-packages    List the registered log package names that can be targeted
+                                   with --debug=<suffix> or --verbose=<suffix>, then exit
           --resolve-sids         Attempt to translate SIDs using MS-LSAT
       -v, --version              Show version
 `
@@ -97,6 +107,7 @@ var helpConnectionOptions = `
 type ridList []uint32
 type stringList []string
 type sidList []SID
+type scActionList []msscmr.SCAction
 
 type SID struct {
 	s string
@@ -110,7 +121,7 @@ func (n *ridList) String() string {
 
 func (n *ridList) Set(value string) error {
 	parts := strings.Split(value, ",")
-	for i, _ := range parts {
+	for i := range parts {
 		str := strings.TrimSpace(parts[i])
 		if strings.Contains(str, " ") {
 			return fmt.Errorf("Rids should be separated by comma, not by space.")
@@ -133,7 +144,7 @@ func (n *stringList) String() string {
 
 func (n *stringList) Set(value string) error {
 	parts := strings.Split(value, ",")
-	for i, _ := range parts {
+	for i := range parts {
 		str := strings.TrimSpace(parts[i])
 		if strings.Contains(str, " ") {
 			return fmt.Errorf("List of strings should be separated by comma, not by space.")
@@ -186,7 +197,7 @@ func (n *sidList) String() string {
 
 func (n *sidList) Set(value string) error {
 	parts := strings.Split(value, ",")
-	for i, _ := range parts {
+	for i := range parts {
 		str := strings.TrimSpace(parts[i])
 		if strings.Contains(str, " ") {
 			return fmt.Errorf("Sids should be separated by comma, not by space.")
@@ -212,6 +223,71 @@ func (n *sidList) GetStrings() []string {
 	return res
 }
 
+func (n *scActionList) String() string {
+	var sb strings.Builder
+	for _, item := range *n {
+		fmt.Fprintf(&sb, "(type: %d, delay: %dms),", item.Type, item.Delay)
+	}
+	return sb.String()
+}
+
+func (n *scActionList) Set(value string) error {
+	parts := strings.Split(value, ",")
+	for i := range parts {
+		str := strings.TrimSpace(parts[i])
+		if str != "" {
+			parts := strings.Split(str, " ")
+			if len(parts) != 2 {
+				return fmt.Errorf("Failed to parse scAction from user argument")
+			}
+			scType, err := strconv.ParseUint(parts[0], 10, 32)
+			if err != nil {
+				return fmt.Errorf("Failed to parse scAction type from user argument with error: %v", err)
+			}
+			if scType > 3 {
+				return fmt.Errorf("Failed to parse scAction type from user arguments. Invalid type")
+			}
+			scDelay, err := strconv.ParseUint(parts[1], 10, 32)
+			if err != nil {
+				return fmt.Errorf("Failed to parse scAction delay from user argument with error: %v", err)
+			}
+			s := msscmr.SCAction{Type: uint32(scType), Delay: uint32(scDelay)}
+			*n = append(*n, s)
+		}
+	}
+
+	return nil
+}
+
+// logFlag is a comma-separated package-suffix filter that also remembers
+// whether the user passed the flag at all. IsBoolFlag is set so the bare
+// "--debug" and "--verbose" form parses (flag pkg then calls Set("true"))
+// — we treat "true" as "no filter, all packages on". A filter list requires
+// the "=" form, e.g. --debug=smb,relay, because IsBoolFlag stops the parser
+// from consuming the next positional token.
+type logFlag struct {
+	set    bool
+	values []string
+}
+
+func (d *logFlag) String() string { return strings.Join(d.values, ",") }
+
+func (d *logFlag) IsBoolFlag() bool { return true }
+
+func (d *logFlag) Set(s string) error {
+	d.set = true
+	d.values = nil
+	if s == "" || s == "true" {
+		return nil
+	}
+	for _, tok := range strings.Split(s, ",") {
+		if tok = strings.TrimSpace(tok); tok != "" {
+			d.values = append(d.values, tok)
+		}
+	}
+	return nil
+}
+
 func isFlagSet(name string) bool {
 	found := false
 	flags.Visit(func(f *flag.Flag) {
@@ -220,6 +296,43 @@ func isFlagSet(name string) bool {
 		}
 	})
 	return found
+}
+
+func exactlyOneAction(actions ...bool) error {
+	n := 0
+	for _, a := range actions {
+		if a {
+			n++
+		}
+	}
+	if n != 1 {
+		return fmt.Errorf("Must specify ONE action. No more, no less")
+	}
+	return nil
+}
+
+// applyLogLevel bumps registered package loggers to level. An empty filter
+// matches every name returned by golog.Names(); a non-empty filter keeps only
+// names whose path suffix matches one of the tokens (see matchesAny).
+func applyLogLevel(level int, filter []string) {
+	flags := golog.LstdFlags | golog.Lshortfile
+	for _, name := range golog.Names() {
+		if len(filter) == 0 || matchesAny(name, filter) {
+			golog.Set(name, "", level, flags, nil, nil)
+		}
+	}
+}
+
+// matchesAny reports whether name equals any token or ends with "/"+token,
+// so "smb" hits ".../go-smb/smb" but not ".../go-smb" (ends in "/go-smb",
+// not "/smb") and not ".../smb/server" (ends in "/server").
+func matchesAny(name string, tokens []string) bool {
+	for _, t := range tokens {
+		if name == t || strings.HasSuffix(name, "/"+t) {
+			return true
+		}
+	}
+	return false
 }
 
 func printVersion() {
@@ -259,7 +372,7 @@ type connArgs struct {
 	forceSMB2   bool
 	localUser   bool
 	nullSession bool
-	relay       bool
+	doRelay     bool
 	noPass      bool
 	kerberos    bool
 	interactive bool
@@ -268,16 +381,17 @@ type connArgs struct {
 }
 
 type generalArgs struct {
-	debug       bool
-	version     bool
-	verbose     bool
-	samr        bool
-	lsad        bool
-	srvs        bool
-	wkst        bool
-	scmr        bool
-	rrp         bool
-	resolveSids bool
+	debug           logFlag
+	verbose         logFlag
+	listLogPackages bool
+	version         bool
+	samr            bool
+	lsad            bool
+	srvs            bool
+	wkst            bool
+	scmr            bool
+	rrp             bool
+	resolveSids     bool
 }
 
 type userArgs struct {
@@ -290,6 +404,7 @@ type userArgs struct {
 	removeRights  bool
 	getDomainInfo bool
 	purgeRights   bool
+	createAccount bool
 	// LSAT actions
 	lookupSids  bool
 	getUserName bool
@@ -297,6 +412,7 @@ type userArgs struct {
 	// SAMR actions
 	enumDomains          bool
 	enumUsers            bool
+	enumAliases          bool
 	listGroups           bool
 	listLocalAdmins      bool
 	listGroupMembers     bool
@@ -319,18 +435,24 @@ type userArgs struct {
 	// SRVS actions
 	// enumSessions
 	enumShares      bool
+	getShareInfo    bool
+	setShareInfo    bool
+	enumDisks       bool
 	getServerInfo   bool
 	getFileSecurity bool
 	// SCMR actions
 	enumServices        bool
 	enumServiceConfigs  bool
 	getServiceConfig    bool
+	getServiceConfig2   bool
 	getServiceStatus    bool
 	changeServiceConfig bool
 	startService        bool
 	controlService      bool
 	createService       bool
 	deleteService       bool
+	getServiceSecurity  bool
+	sacl                bool
 	// RRP actions
 	getKeyValue    bool
 	setKeyValue    bool
@@ -344,43 +466,60 @@ type userArgs struct {
 	getKeySecurity bool
 	setKeySecurity bool
 	// arguments
-	sid                 SID
-	sids                sidList
-	rights              stringList
-	systemRights        bool
-	rid                 uint64
-	userRid             uint64
-	rids                ridList
-	localDomain         string
-	name                string
-	userPassword        string
-	netbiosComputerName string
-	alias               bool
-	level               int
-	limit               int
-	oldNTHash           string
-	newPass             string
-	names               stringList
-	serviceState        uint64
-	serviceType         uint64
-	serviceStartType    uint64
-	serviceErrorControl uint64
-	arguments           stringList
-	serviceAction       string
-	exePath             string
-	startName           string
-	displayName         string
-	key                 string
-	stringValue         string
-	dwordValue          uint64
-	qwordValue          uint64
-	binaryValue         binaryArg
-	remotePath          string
-	ownerSid            SID
-	debugPrivilege      bool
-	createAndStart      bool
-	share               string
-	filePath            string
+	sid                       SID
+	sids                      sidList
+	rights                    stringList
+	systemRights              bool
+	rid                       uint64
+	userRid                   uint64
+	rids                      ridList
+	localDomain               string
+	name                      string
+	userPassword              string
+	netbiosComputerName       string
+	alias                     bool
+	level                     int
+	limit                     int
+	oldNTHash                 string
+	newPass                   string
+	names                     stringList
+	serviceState              uint64
+	serviceType               uint64
+	serviceStartType          uint64
+	serviceErrorControl       uint64
+	infoLevel                 uint64
+	arguments                 stringList
+	serviceAction             string
+	exePath                   string
+	startName                 string
+	displayName               string
+	dependencies              string
+	loadOrderGroup            string
+	key                       string
+	stringValue               string
+	dwordValue                uint64
+	qwordValue                uint64
+	binaryValue               binaryArg
+	remotePath                string
+	ownerSid                  SID
+	debugPrivilege            bool
+	createAndStart            bool
+	share                     string
+	filePath                  string
+	comment                   string
+	shareFlags                uint64
+	serviceDescription        string
+	serviceFailureActionsFlag bool
+	delayedAutoStart          bool
+	sidType                   uint64
+	requiredPrivileges        stringList
+	preShutdownTimeout        uint64
+	preferredNode             uint64
+	preferredNodeDelete       bool
+	resetPeriod               uint64
+	rebootMsg                 string
+	failureCommand            string
+	serviceFailActions        scActionList
 }
 
 func addConnectionArgs(flagSet *flag.FlagSet, argv *userArgs) {
@@ -394,15 +533,15 @@ func addConnectionArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.StringVar(&argv.domain, "domain", "", "")
 	flagSet.IntVar(&argv.port, "P", 445, "")
 	flagSet.IntVar(&argv.port, "port", 445, "")
-	flagSet.BoolVar(&argv.debug, "debug", false, "")
-	flagSet.BoolVar(&argv.verbose, "verbose", false, "")
+	flagSet.Var(&argv.debug, "debug", "")
+	flagSet.Var(&argv.verbose, "verbose", "")
 	flagSet.BoolVar(&argv.noEnc, "noenc", false, "")
 	flagSet.BoolVar(&argv.forceSMB2, "smb2", false, "")
 	flagSet.BoolVar(&argv.localUser, "local", false, "")
 	flagSet.DurationVar(&argv.dialTimeout, "t", time.Second*5, "")
 	flagSet.DurationVar(&argv.dialTimeout, "timeout", time.Second*5, "")
 	flagSet.BoolVar(&argv.nullSession, "null", false, "")
-	flagSet.BoolVar(&argv.relay, "relay", false, "")
+	flagSet.BoolVar(&argv.doRelay, "relay", false, "")
 	flagSet.IntVar(&argv.relayPort, "relay-port", 445, "")
 	flagSet.StringVar(&argv.socksHost, "socks-host", "", "")
 	flagSet.IntVar(&argv.socksPort, "socks-port", 1080, "")
@@ -422,6 +561,7 @@ func addConnectionArgs(flagSet *flag.FlagSet, argv *userArgs) {
 func addSamrArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.BoolVar(&argv.enumDomains, "enum-domains", false, "")
 	flagSet.BoolVar(&argv.enumUsers, "enum-users", false, "")
+	flagSet.BoolVar(&argv.enumAliases, "enum-aliases", false, "")
 	flagSet.BoolVar(&argv.lookupDomain, "lookup-domain", false, "")
 	flagSet.BoolVar(&argv.lookupRids, "lookup-rids", false, "")
 	flagSet.BoolVar(&argv.lookupNames, "lookup-names", false, "")
@@ -460,6 +600,7 @@ func addLsadArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.BoolVar(&argv.addRights, "add", false, "")
 	flagSet.BoolVar(&argv.removeRights, "remove", false, "")
 	flagSet.BoolVar(&argv.purgeRights, "purge", false, "")
+	flagSet.BoolVar(&argv.createAccount, "create-account", false, "")
 	flagSet.BoolVar(&argv.getDomainInfo, "getinfo", false, "")
 	flagSet.Var(&argv.sid, "sid", "")
 	flagSet.Var(&argv.sids, "sids", "")
@@ -481,27 +622,36 @@ func addWkstArgs(flagSet *flag.FlagSet, argv *userArgs) {
 func addSrvsArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.BoolVar(&argv.enumSessions, "enum-sessions", false, "")
 	flagSet.BoolVar(&argv.enumShares, "enum-shares", false, "")
+	flagSet.BoolVar(&argv.getShareInfo, "get-share-info", false, "")
+	flagSet.BoolVar(&argv.setShareInfo, "set-share-info", false, "")
+	flagSet.BoolVar(&argv.enumDisks, "enum-disks", false, "")
 	flagSet.BoolVar(&argv.getServerInfo, "get-info", false, "")
 	flagSet.BoolVar(&argv.getFileSecurity, "get-file-security", false, "")
 	flagSet.IntVar(&argv.level, "level", 0, "")
 	flagSet.StringVar(&argv.share, "share", "", "")
 	flagSet.StringVar(&argv.filePath, "path", "", "")
+	flagSet.StringVar(&argv.comment, "comment", "", "")
+	flagSet.Uint64Var(&argv.shareFlags, "share-flags", 0, "")
 }
 
 func addScmrArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.BoolVar(&argv.enumServices, "enum-services", false, "")
 	flagSet.BoolVar(&argv.enumServiceConfigs, "enum-service-configs", false, "")
 	flagSet.BoolVar(&argv.getServiceConfig, "get-service-config", false, "")
+	flagSet.BoolVar(&argv.getServiceConfig2, "get-service-config2", false, "")
 	flagSet.BoolVar(&argv.getServiceStatus, "get-service-status", false, "")
 	flagSet.BoolVar(&argv.changeServiceConfig, "change-service-config", false, "")
 	flagSet.BoolVar(&argv.startService, "start-service", false, "")
 	flagSet.BoolVar(&argv.controlService, "control-service", false, "")
 	flagSet.BoolVar(&argv.createService, "create-service", false, "")
 	flagSet.BoolVar(&argv.deleteService, "delete-service", false, "")
+	flagSet.BoolVar(&argv.getServiceSecurity, "get-service-security", false, "")
+	flagSet.BoolVar(&argv.sacl, "sacl", false, "")
 	flagSet.Uint64Var(&argv.serviceType, "service-type", 0x30, "")
 	flagSet.Uint64Var(&argv.serviceStartType, "start-type", 0x3, "")
 	flagSet.Uint64Var(&argv.serviceErrorControl, "error-control", 0x1, "")
 	flagSet.Uint64Var(&argv.serviceState, "service-state", 0x3, "")
+	flagSet.Uint64Var(&argv.infoLevel, "info-level", 0x0, "")
 	flagSet.StringVar(&argv.name, "name", "", "")
 	flagSet.StringVar(&argv.serviceAction, "action", "", "")
 	flagSet.Var(&argv.arguments, "args", "")
@@ -509,7 +659,21 @@ func addScmrArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.StringVar(&argv.startName, "start-name", "", "")
 	flagSet.StringVar(&argv.userPassword, "start-pass", "", "")
 	flagSet.StringVar(&argv.displayName, "display-name", "", "")
+	flagSet.StringVar(&argv.dependencies, "dependencies", "", "")
+	flagSet.StringVar(&argv.loadOrderGroup, "load-order-group", "", "")
 	flagSet.BoolVar(&argv.createAndStart, "start", false, "")
+	flagSet.StringVar(&argv.serviceDescription, "description", "", "")
+	flagSet.Var(&argv.serviceFailActions, "failure-actions", "")
+	flagSet.Uint64Var(&argv.resetPeriod, "reset-period", 0, "")
+	flagSet.StringVar(&argv.rebootMsg, "reboot-msg", "", "")
+	flagSet.StringVar(&argv.failureCommand, "failure-command", "", "")
+	flagSet.BoolVar(&argv.serviceFailureActionsFlag, "failure-actions-flag", false, "")
+	flagSet.BoolVar(&argv.delayedAutoStart, "delayed-autostart", false, "")
+	flagSet.Uint64Var(&argv.sidType, "sid-type", 0x0, "")
+	flagSet.Var(&argv.requiredPrivileges, "required-privileges", "")
+	flagSet.Uint64Var(&argv.preShutdownTimeout, "pre-shutdown", 0x0, "")
+	flagSet.Uint64Var(&argv.preferredNode, "preferred-node", 0x0, "")
+	flagSet.BoolVar(&argv.preferredNodeDelete, "preferred-node-delete", false, "")
 }
 
 func addRrpArgs(flagSet *flag.FlagSet, argv *userArgs) {
@@ -530,8 +694,15 @@ func addRrpArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.Uint64Var(&argv.qwordValue, "qword-val", 0, "")
 	flagSet.Var(&argv.binaryValue, "binary-val", "")
 	flagSet.StringVar(&argv.remotePath, "remote-path", "", "")
-	flagSet.Var(&argv.ownerSid, "owner", "")
+	flagSet.Var(&argv.ownerSid, "owner-sid", "")
 	flagSet.BoolVar(&argv.debugPrivilege, "use-debug-privilege", false, "")
+}
+
+func addSmbArgs(flagSet *flag.FlagSet, argv *userArgs) {
+	flagSet.BoolVar(&argv.getFileSecurity, "get-file-security", false, "")
+	flagSet.StringVar(&argv.share, "share", "", "")
+	flagSet.StringVar(&argv.filePath, "path", "", "")
+	flagSet.BoolVar(&argv.sacl, "sacl", false, "")
 }
 
 func handleArgs() (action byte, argv *userArgs, err error) {
@@ -541,108 +712,112 @@ func handleArgs() (action byte, argv *userArgs, err error) {
 		os.Exit(0)
 	}
 	argv = &userArgs{}
-	flags.BoolVar(&argv.samr, "samr", false, "")
-	flags.BoolVar(&argv.lsad, "lsad", false, "")
-	flags.BoolVar(&argv.srvs, "srvs", false, "")
-	flags.BoolVar(&argv.wkst, "wkst", false, "")
-	flags.BoolVar(&argv.scmr, "scmr", false, "")
-	flags.BoolVar(&argv.rrp, "rrp", false, "")
-	flags.BoolVar(&argv.connArgs.interactive, "i", false, "")
-	flags.BoolVar(&argv.connArgs.interactive, "interactive", false, "")
 	flags.BoolVar(&argv.version, "v", false, "")
 	flags.BoolVar(&argv.version, "version", false, "")
+	flags.BoolVar(&argv.listLogPackages, "list-log-packages", false, "")
 
 	if len(os.Args) < 2 {
 		flags.Usage()
 	}
 
-	// Parse only first argument
-	err = flags.Parse(os.Args[1:2])
-	if err != nil {
-		log.Errorf("Error parsing arguments: %s\n", err)
-		return
-	}
-	if argv.version {
-		return
-	}
-
-	numAction := 0
-	if argv.samr {
-		numAction++
-	}
-	if argv.lsad {
-		numAction++
-	}
-	if argv.srvs {
-		numAction++
-	}
-	if argv.wkst {
-		numAction++
-	}
-	if argv.scmr {
-		numAction++
-	}
-	if argv.rrp {
-		numAction++
-	}
-	if argv.interactive {
-		numAction++
-	}
-	if numAction != 1 {
-		fmt.Println("Must specify ONE action. No more, no less")
+	switch os.Args[1] {
+	case "-h", "--help", "help":
 		flags.Usage()
-	}
-	if argv.interactive {
+	case "-v", "--version", "version":
+		argv.version = true
+		return
+	case "--list-log-packages":
+		argv.listLogPackages = true
+		return
+	case "interactive", "shell", "-i":
+		argv.interactive = true
 		action = 1
-	} else if argv.lsad {
+	case "lsad":
 		flags.Usage = func() {
 			fmt.Println(helpLsadOptions)
 			os.Exit(0)
 		}
 		addLsadArgs(flags, argv)
+		argv.lsad = true
 		action = 2
-	} else if argv.samr {
+	case "samr":
 		flags.Usage = func() {
 			fmt.Println(helpSamrOptions)
 			os.Exit(0)
 		}
 		addSamrArgs(flags, argv)
+		argv.samr = true
 		action = 3
-	} else if argv.wkst {
+	case "wkst":
 		flags.Usage = func() {
 			fmt.Println(helpWkstOptions)
 			os.Exit(0)
 		}
 		addWkstArgs(flags, argv)
+		argv.wkst = true
 		action = 4
-	} else if argv.srvs {
+	case "srvs":
 		flags.Usage = func() {
 			fmt.Println(helpSrvsOptions)
 			os.Exit(0)
 		}
 		addSrvsArgs(flags, argv)
+		argv.srvs = true
 		action = 5
-	} else if argv.scmr {
+	case "scmr":
 		flags.Usage = func() {
 			fmt.Println(helpScmrOptions)
 			os.Exit(0)
 		}
 		addScmrArgs(flags, argv)
+		argv.scmr = true
 		action = 6
-	} else if argv.rrp {
+	case "rrp":
 		flags.Usage = func() {
 			fmt.Println(helpRRPOptions)
 			os.Exit(0)
 		}
 		addRrpArgs(flags, argv)
+		argv.rrp = true
 		action = 7
+	case "smb":
+		flags.Usage = func() {
+			fmt.Println(helpSmbOptions)
+			os.Exit(0)
+		}
+		addSmbArgs(flags, argv)
+		action = 8
+	default:
+		fmt.Printf("Unknown service: %s\n", os.Args[1])
+		flags.Usage()
 	}
 
 	addConnectionArgs(flags, argv)
-	err = flags.Parse(os.Args[1:])
+	err = flags.Parse(os.Args[2:])
 	if err != nil {
 		log.Errorf("error: %s\n", err)
 		return
+	}
+
+	switch action {
+	case 2:
+		err = validateLsadActions(argv)
+	case 3:
+		err = validateSamrActions(argv)
+	case 4:
+		err = validateWkstActions(argv)
+	case 5:
+		err = validateSrvsActions(argv)
+	case 6:
+		err = validateScmrActions(argv)
+	case 7:
+		err = validateRrpActions(argv)
+	case 8:
+		err = validateSmbActions(argv)
+	}
+	if err != nil {
+		fmt.Println(err)
+		flags.Usage()
 	}
 
 	return
@@ -662,14 +837,14 @@ func makeConnection(args *connArgs) (err error) {
 				log.Infoln("No port number specified for --dns-host so assuming port 53")
 			} else {
 				fmt.Println("Invalid --dns-host")
-				flag.Usage()
+				flags.Usage()
 				return
 			}
 		}
 		ip := net.ParseIP(parts[0])
 		if ip == nil {
 			fmt.Println("Invalid --dns-host. Not a valid ip host address")
-			flag.Usage()
+			flags.Usage()
 			return
 		}
 		p, err = strconv.ParseUint(parts[1], 10, 32)
@@ -679,7 +854,7 @@ func makeConnection(args *connArgs) (err error) {
 		}
 		if p < 1 {
 			fmt.Println("Invalid --dns-host port number")
-			flag.Usage()
+			flags.Usage()
 			return
 		}
 	}
@@ -691,7 +866,7 @@ func makeConnection(args *connArgs) (err error) {
 
 	if args.socksHost != "" && args.socksPort < 1 {
 		fmt.Println("Invalid --socks-port")
-		flag.Usage()
+		flags.Usage()
 		return
 	}
 
@@ -810,9 +985,13 @@ func makeConnection(args *connArgs) (err error) {
 	// Set DialTimeout for go-smb
 	smbOptions.DialTimeout = args.dialTimeout
 
-	if args.relay {
-		smbOptions.RelayPort = args.relayPort
-		args.opts.c, err = smb.NewRelayConnection(smbOptions)
+	if args.doRelay {
+		relayConf := relay.ClientConfig{
+			ListenAddr:      fmt.Sprintf(":%d", args.relayPort),
+			Target:          fmt.Sprintf("%s:445", args.targetIP),
+			UpstreamOptions: smbOptions,
+		}
+		args.opts.c, _, err = relay.RelayClient(relayConf)
 	} else {
 		args.opts.c, err = smb.NewConnection(smbOptions)
 	}
@@ -847,49 +1026,35 @@ func main() {
 
 	action, args, _ := handleArgs()
 
-	if !args.interactive {
-		if args.debug {
-			golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc", "dcerpc", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/msdtyp", "msdtyp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/mslsad", "mslsad", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/mssamr", "mssamr", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/mswkst", "mswkst", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/mssrvs", "mssrvs", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/msscmr", "msscmr", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/msrrp", "msrrp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			log.SetFlags(golog.LstdFlags | golog.Lshortfile)
-			log.SetLogLevel(golog.LevelDebug)
-		} else if args.verbose {
-			golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc", "dcerpc", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/msdtyp", "msdtyp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/mslsad", "mslsad", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/mssamr", "mssamr", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/mswkst", "mswkst", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/mssrvs", "mssrvs", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/msscmr", "msscmr", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/msrrp", "msrrp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			log.SetLogLevel(golog.LevelInfo)
-		} else {
-			golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc", "dcerpc", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/msdtyp", "msdtyp", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/mslsad", "mslsad", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/mssamr", "mssamr", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/mswkst", "mswkst", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/mssrvs", "mssrvs", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/msscmr", "msscmr", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/dcerpc/msrrp", "msrrp", golog.LevelNone, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-			golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+	if args.listLogPackages {
+		// The package loggers are registered at import time, so golog.Names()
+		// here lists every logger this binary can target. The suffix of any of
+		// these names (a path segment) is what --debug=/--verbose= matches.
+		names := golog.Names()
+		sort.Strings(names)
+		fmt.Println("Registered log packages (target a name's suffix with --debug=<suffix> or --verbose=<suffix>):")
+		for _, name := range names {
+			fmt.Println(name)
+		}
+		return
+	}
+
+	// --debug and --verbose are not mutually exclusive: each may carry its own
+	// comma-separated package filter (e.g. --debug=smb,relay --verbose=main).
+	// Verbose is applied first and debug second so that any package targeted by
+	// both ends up at the higher level (LevelDebug > LevelInfo). A bare --debug
+	// or --verbose (empty filter) targets every registered package, so passing
+	// both bare is ambiguous and rejected.
+	if !args.interactive && (args.debug.set || args.verbose.set) {
+		if args.debug.set && args.verbose.set && len(args.debug.values) == 0 && len(args.verbose.values) == 0 {
+			fmt.Println("Cannot enable both --debug and --verbose for all packages at once. Specify just one of them, or be more granular e.g. --debug=smb,relay --verbose=main")
+			return
+		}
+		if args.verbose.set {
+			applyLogLevel(golog.LevelInfo, args.verbose.values)
+		}
+		if args.debug.set {
+			applyLogLevel(golog.LevelDebug, args.debug.values)
 		}
 	}
 
@@ -914,7 +1079,7 @@ func main() {
 			log.Errorln(err)
 			return
 		}
-		if !args.opts.c.IsAuthenticated() {
+		if args.opts == nil || args.opts.c == nil || !args.opts.c.IsAuthenticated() {
 			// Login failed
 			args.opts.smbOptions.ManualLogin = true
 		}
@@ -927,40 +1092,22 @@ func main() {
 		return
 	case 2:
 		err = handleLsaRpc(args)
-		if err != nil {
-			log.Errorln(err)
-			return
-		}
 	case 3:
 		err = handleSamr(args)
-		if err != nil {
-			log.Errorln(err)
-			return
-		}
 	case 4:
 		err = handleWkst(args)
-		if err != nil {
-			log.Errorln(err)
-			return
-		}
 	case 5:
 		err = handleSrvs(args)
-		if err != nil {
-			log.Errorln(err)
-			return
-		}
 	case 6:
 		err = handleScmr(args)
-		if err != nil {
-			log.Errorln(err)
-			return
-		}
 	case 7:
 		err = handleRrp(args)
-		if err != nil {
-			log.Errorln(err)
-			return
-		}
+	case 8:
+		err = handleSmb(args)
+	}
+	if err != nil {
+		log.Errorln(err)
+		os.Exit(1)
 	}
 	return
 }

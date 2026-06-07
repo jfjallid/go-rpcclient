@@ -196,13 +196,11 @@ func regGetValueFunc(self *shell, argArr interface{}) {
 		return
 	}
 	usage := "Usage: " + usageMap[RegGetValue]
-	var name string
+	var key, name string
 	rpccon, err := self.getRrpHandle()
 	if err != nil {
 		self.println(err)
 		return
-	}
-	if rpccon != nil {
 	}
 	args := argArr.([]string)
 	numArgs := len(args)
@@ -210,12 +208,16 @@ func regGetValueFunc(self *shell, argArr interface{}) {
 		self.println(usage)
 		return
 	} else if numArgs > 1 {
-		name = args[1]
+		name = args[numArgs-1]
+		key = strings.Join(args[:numArgs-1], " ")
+		//name = args[1]
+	} else {
+		key = args[0]
 	}
 	var hive byte
 	var hKeyBase []byte
 	var regKeyPath, hiveStr string
-	hive, hiveStr, regKeyPath, err = parseRegKeyPath(args[0])
+	hive, hiveStr, regKeyPath, err = parseRegKeyPath(key)
 	if err != nil {
 		self.println(err)
 		return

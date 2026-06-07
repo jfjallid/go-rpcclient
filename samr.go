@@ -38,11 +38,12 @@ import (
 )
 
 var helpSamrOptions = `
-    Usage: ` + os.Args[0] + ` --samr [options] <action>
+    Usage: ` + os.Args[0] + ` samr [options] <action>
     ` + helpConnectionOptions + `
     Action:
           --enum-domains       List SAMR Domains
           --enum-users         List users (--local-domain or --netbios to specify a different domain)
+          --enum-aliases       List domain aliases (--local-domain or --netbios to specify a different domain)
           --list-groups        List domain groups (or aliases with --alias)
           --list-admins        List members of local administrators group
           --list-members       List members of group or alias
@@ -178,12 +179,33 @@ func lookupNames(rpccon *mssamr.RPCCon, handle *mssamr.SamrHandle, domainName st
 	return lookupNamesInDomain(rpccon, domainHandle, names)
 }
 
+func validateSamrActions(args *userArgs) error {
+	return exactlyOneAction(
+		args.enumDomains,
+		args.addToLocalGroup,
+		args.listLocalAdmins,
+		args.listGroupMembers,
+		args.removeFromLocalGroup,
+		args.createUser,
+		args.createComputer,
+		args.lookupRids,
+		args.lookupNames,
+		args.lookupSid,
+		args.lookupDomain,
+		args.listGroups,
+		args.resetUserPassword,
+		args.changeUserPassword,
+		args.enumUsers,
+		args.enumAliases,
+		args.translateSid,
+		args.addLocalAdmin,
+		args.deleteUser,
+		args.queryUser,
+	)
+}
+
 func handleSamr(args *userArgs) (err error) {
 	var passBytes []byte
-	numActions := 0
-	if args.enumDomains {
-		numActions++
-	}
 	if args.addToLocalGroup {
 		if args.rid == 0 {
 			log.Errorln("Must specify a --rid of local group/alias to add a member")
@@ -198,14 +220,9 @@ func handleSamr(args *userArgs) (err error) {
 			log.Errorln("Must specify a --user-rid which should be added to the local group")
 			return
 		}
-		numActions++
 	}
 	if args.listLocalAdmins {
 		args.rid = 544
-		numActions++
-	}
-	if args.listGroupMembers {
-		numActions++
 	}
 	if args.removeFromLocalGroup {
 		if !args.alias {
@@ -217,7 +234,6 @@ func handleSamr(args *userArgs) (err error) {
 			log.Errorln("Must specify a --sid to remove from alias")
 			return
 		}
-		numActions++
 	}
 	if args.createUser {
 		if args.name == "" {
@@ -234,7 +250,6 @@ func handleSamr(args *userArgs) (err error) {
 			}
 			args.userPassword = string(passBytes)
 		}
-		numActions++
 	}
 	if args.createComputer {
 		if args.name == "" {
@@ -251,17 +266,14 @@ func handleSamr(args *userArgs) (err error) {
 			}
 			args.userPassword = string(passBytes)
 		}
-		numActions++
 	}
 	if args.lookupRids {
-		numActions++
 		if len(args.rids) == 0 {
 			log.Errorln("Must specify --rids when looking up rids")
 			return
 		}
 	}
 	if args.lookupNames {
-		numActions++
 		if len(args.names) == 0 {
 			log.Errorln("Must specify --names when looking up names")
 			return
@@ -276,17 +288,12 @@ func handleSamr(args *userArgs) (err error) {
 			log.Errorln("Must specify --rid to lookup in domain")
 			return
 		}
-		numActions++
 	}
 	if args.lookupDomain {
 		if args.localDomain == "" {
 			log.Errorln("Must specify a --local-domain to lookup")
 			return
 		}
-		numActions++
-	}
-	if args.listGroups {
-		numActions++
 	}
 	if args.resetUserPassword {
 		if args.sid.v == nil {
@@ -295,7 +302,6 @@ func handleSamr(args *userArgs) (err error) {
 				return
 			}
 		}
-		numActions++
 	}
 	if args.changeUserPassword {
 		// Check for username
@@ -307,43 +313,30 @@ func handleSamr(args *userArgs) (err error) {
 			log.Errorln("--old-hash and --user-pass are mutually exclusive")
 			return
 		}
-		numActions++
-	}
-	if args.enumUsers {
-		numActions++
 	}
 	if args.translateSid {
 		if args.sid.s == "" {
 			log.Errorln("Must specify a --sid to convert to a name")
 			return
 		}
-		numActions++
 	}
 	if args.addLocalAdmin {
 		if args.sid.s == "" {
 			log.Errorln("Must specify a --sid to add as local admin")
 			return
 		}
-		numActions++
 	}
 	if args.deleteUser {
 		if args.userRid == 0 {
 			log.Errorln("Must specify --user-rid when removing a local user")
 			return
 		}
-		numActions++
 	}
 	if args.queryUser {
 		if (args.userRid == 0) && (args.name == "") {
 			log.Errorln("Must specify --user-rid or --name when querying a local user")
 			return
 		}
-		numActions++
-	}
-	if numActions != 1 {
-		fmt.Println("Must specify ONE action. No more, no less")
-		flags.Usage()
-		return
 	}
 
 	if (args.listGroupMembers || args.removeFromLocalGroup) && (args.rid == 0) {
@@ -357,6 +350,11 @@ func handleSamr(args *userArgs) (err error) {
 		log.Errorln(err)
 		return
 	}
+	if args.opts == nil || args.opts.c == nil {
+		err = fmt.Errorf("failed to establish connection to server")
+		return
+	}
+
 	conn := args.opts.c
 	defer conn.Close()
 
@@ -522,7 +520,23 @@ func handleSamr(args *userArgs) (err error) {
 			fmt.Printf("Found %d Local Users:\n", len(users))
 		}
 		for _, user := range users {
-			fmt.Printf("Rid: %d, Name: %s\n", user.RelativeId, user.Name)
+			fmt.Printf("Rid: %d, Name: %s\n", user.RelativeId, user.Name.Value)
+		}
+		return
+	} else if args.enumAliases {
+		domainName := args.netbiosComputerName
+		if args.localDomain != "" {
+			domainName = args.localDomain
+		}
+		var aliases []mssamr.SamprRidEnumeration
+		aliases, err = rpccon.ListDomainAliases(domainName)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+		fmt.Println("Aliases:")
+		for _, alias := range aliases {
+			fmt.Printf("Rid: %d, Name: %s\n", alias.RelativeId, alias.Name.Value)
 		}
 		return
 	} else if args.createUser {
@@ -758,7 +772,7 @@ func handleSamr(args *userArgs) (err error) {
 			fmt.Println("Groups:")
 		}
 		for _, group := range groups {
-			fmt.Printf("Rid: %d, Name: %s\n", group.RelativeId, group.Name)
+			fmt.Printf("Rid: %d, Name: %s\n", group.RelativeId, group.Name.Value)
 		}
 		return
 	} else if args.deleteUser {
@@ -803,7 +817,7 @@ func handleSamr(args *userArgs) (err error) {
 			log.Errorln(err)
 			return
 		}
-		fmt.Printf("Username: %s\nDescription: %s\nUser Rid: %d\nLast Logon: %s\nPassword Last Changed: %s\nPassword Can Change: %s\nUserAcountControl: 0x%x\nBadPwdCount: %d\nLogonCount: %d\nPassword expired: %v\n", info.Username, info.AdminComment, info.UserId, info.LastLogon.ToString(), info.PasswordLastSet.ToString(), info.PasswordCanChange.ToString(), info.UserAccountControl, info.BadPasswordCount, info.LogonCount, info.PasswordExpired)
+		fmt.Printf("Username: %s\nDescription: %s\nUser Rid: %d\nLast Logon: %s\nPassword Last Changed: %s\nPassword Can Change: %s\nUserAcountControl: 0x%x\nBadPwdCount: %d\nLogonCount: %d\nPassword expired: %v\n", info.Username.Value, info.AdminComment.Value, info.UserId, info.LastLogon.ToString(), info.PasswordLastSet.ToString(), info.PasswordCanChange.ToString(), info.UserAccountControl, info.BadPasswordCount, info.LogonCount, info.PasswordExpired)
 		return
 	} else if args.translateSid {
 		name := ""

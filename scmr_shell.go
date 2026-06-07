@@ -24,11 +24,14 @@ package main
 import (
 	"fmt"
 	"maps"
+	"strconv"
 	"strings"
 
 	"github.com/jfjallid/go-smb/dcerpc"
+	"github.com/jfjallid/go-smb/dcerpc/mslsad"
 	"github.com/jfjallid/go-smb/dcerpc/msscmr"
 	"github.com/jfjallid/go-smb/dcerpc/smbtransport"
+	"github.com/jfjallid/go-smb/msdtyp"
 	"github.com/jfjallid/go-smb/smb"
 	"github.com/jfjallid/golog"
 )
@@ -37,6 +40,7 @@ const (
 	ScmrEnumServices    = "scmrenumservices"
 	ScmrEnumSvcConfigs  = "scmrenumserviceconfigs"
 	ScmrGetSvcConfig    = "scmrgetserviceconfig"
+	ScmrGetSvcConfig2   = "scmrgetserviceconfig2"
 	ScmrGetSvcStatus    = "scmrgetservicestatus"
 	ScmrChangeSvcConfig = "scmrchangeserviceconfig"
 	ScmrStartService    = "scmrstartservice"
@@ -44,12 +48,14 @@ const (
 	ScmrCreateService   = "scmrcreateservice"
 	ScmrDeleteService   = "scmrdeleteservice"
 	ScmrEnableService   = "scmrenableservice"
+	ScmrGetSvcSecurity  = "scmrgetservicesecurity"
 )
 
 var scmrUsageKeys = []string{
 	ScmrEnumServices,
 	ScmrEnumSvcConfigs,
 	ScmrGetSvcConfig,
+	ScmrGetSvcConfig2,
 	ScmrGetSvcStatus,
 	ScmrChangeSvcConfig,
 	ScmrStartService,
@@ -57,12 +63,14 @@ var scmrUsageKeys = []string{
 	ScmrCreateService,
 	ScmrDeleteService,
 	ScmrEnableService,
+	ScmrGetSvcSecurity,
 }
 
 var scmrUsageMap = map[string]string{
 	ScmrEnumServices:    ScmrEnumServices + " [<state> [type]]",
 	ScmrEnumSvcConfigs:  ScmrEnumSvcConfigs,
 	ScmrGetSvcConfig:    ScmrGetSvcConfig + " <name>",
+	ScmrGetSvcConfig2:   ScmrGetSvcConfig2 + " <name> [info-level]",
 	ScmrGetSvcStatus:    ScmrGetSvcStatus + " <name>",
 	ScmrChangeSvcConfig: ScmrChangeSvcConfig + " <name>",
 	ScmrStartService:    ScmrStartService + " <name>",
@@ -70,12 +78,14 @@ var scmrUsageMap = map[string]string{
 	ScmrCreateService:   ScmrCreateService + " <name>",
 	ScmrDeleteService:   ScmrDeleteService + " <name>",
 	ScmrEnableService:   ScmrEnableService + " <name>",
+	ScmrGetSvcSecurity:  ScmrGetSvcSecurity + " <name|SCMANAGER> [sacl]",
 }
 
 var scmrDescriptionMap = map[string]string{
 	ScmrEnumServices:    "List services of specified type and states",
 	ScmrEnumSvcConfigs:  "List configs of services of specified type and states",
 	ScmrGetSvcConfig:    "Retrieve service config",
+	ScmrGetSvcConfig2:   "Retrieve extended service config (info-level: 1=description, 2=failure actions, 3=delayed-autostart, 4=failure-actions-flag, 5=sid-info, 6=required-privs, 7=preshutdown, 9=preferred-node)",
 	ScmrGetSvcStatus:    "Check status of service",
 	ScmrChangeSvcConfig: "Change config of a service",
 	ScmrStartService:    "Start a service",
@@ -83,6 +93,7 @@ var scmrDescriptionMap = map[string]string{
 	ScmrCreateService:   "Create new service",
 	ScmrDeleteService:   "Delete service",
 	ScmrEnableService:   "Enable service (change start type)",
+	ScmrGetSvcSecurity:  "Retrieve the security descriptor of a service, or of the SCM database with the name SCMANAGER (append 'sacl' to also request the SACL)",
 }
 
 func printScmrHelp(self *shell) {
@@ -97,6 +108,7 @@ func init() {
 	handlers[ScmrEnumServices] = scmrEnumServicesFunc
 	handlers[ScmrEnumSvcConfigs] = scmrEnumServiceConfigsFunc
 	handlers[ScmrGetSvcConfig] = scmrGetServiceConfigFunc
+	handlers[ScmrGetSvcConfig2] = scmrGetServiceConfig2Func
 	handlers[ScmrGetSvcStatus] = scmrGetServiceStatusFunc
 	handlers[ScmrChangeSvcConfig] = scmrChangeServiceConfigFunc
 	handlers[ScmrStartService] = scmrStartServiceFunc
@@ -104,6 +116,7 @@ func init() {
 	handlers[ScmrCreateService] = scmrCreateServiceFunc
 	handlers[ScmrDeleteService] = scmrDeleteServiceFunc
 	handlers[ScmrEnableService] = scmrEnableServiceFunc
+	handlers[ScmrGetSvcSecurity] = scmrGetServiceSecurityFunc
 	helpFunctions[6] = printScmrHelp
 }
 
@@ -466,7 +479,17 @@ func scmrChangeServiceConfigFunc(self *shell, argArr interface{}) {
 			self.println(item)
 		}
 	}
-	err = rpccon.ChangeServiceConfig(name, svcType, svcStartType, svcErrorControl, svcExePath, svcStartName, svcUserPass, svcDisplayName, "", "", 0)
+	var pExePath, pStartName, pDisplayName *string
+	if svcExePath != "" {
+		pExePath = &svcExePath
+	}
+	if svcStartName != "" {
+		pStartName = &svcStartName
+	}
+	if svcDisplayName != "" {
+		pDisplayName = &svcDisplayName
+	}
+	err = rpccon.ChangeServiceConfig(name, svcType, svcStartType, svcErrorControl, pExePath, pStartName, svcUserPass, pDisplayName, nil, "", 0)
 	if err != nil {
 		self.println(err)
 		return
@@ -715,10 +738,170 @@ func scmrEnableServiceFunc(self *shell, argArr interface{}) {
 		return
 	}
 	name = args[0]
-	err = rpccon.ChangeServiceConfig(name, msscmr.ServiceNoChange, msscmr.ServiceDemandStart, msscmr.ServiceNoChange, "", "", "", "", "", "", 0)
+	err = rpccon.ChangeServiceConfig(name, msscmr.ServiceNoChange, msscmr.ServiceDemandStart, msscmr.ServiceNoChange, nil, nil, "", nil, nil, "", 0)
 	if err != nil {
 		self.println(err)
 		return
 	}
 	self.println("Service enabled!")
+}
+
+func scmrGetServiceConfig2Func(self *shell, argArr interface{}) {
+	if !self.authenticated {
+		self.println("Not logged in!")
+		return
+	}
+	usage := "Usage: " + usageMap[ScmrGetSvcConfig2]
+	args := argArr.([]string)
+	if len(args) < 1 {
+		self.println(usage)
+		return
+	}
+	name := args[0]
+	infoLevel := uint64(1)
+	if len(args) > 1 {
+		v, err := strconv.ParseUint(args[1], 10, 32)
+		if err != nil {
+			self.println("Invalid info-level")
+			self.println(usage)
+			return
+		}
+		infoLevel = v
+	}
+	rpccon, err := self.getScmrHandle()
+	if err != nil {
+		self.println(err)
+		return
+	}
+	switch infoLevel {
+	case uint64(msscmr.ServiceConfigDescription):
+		description, err := rpccon.GetServiceDescription(name)
+		if err != nil {
+			self.println(err)
+			return
+		}
+		self.printf("SERVICE_NAME        : %s\n", name)
+		self.printf("SERVICE_DESCRIPTION : %s\n", description)
+	case uint64(msscmr.ServiceConfigFailure_actions):
+		result, err := rpccon.GetServiceFailureActions(name)
+		if err != nil {
+			self.println(err)
+			return
+		}
+		command := ""
+		rebootMsg := ""
+		if result.Command != nil {
+			command = *result.Command
+		}
+		if result.RebootMsg != nil {
+			rebootMsg = *result.RebootMsg
+		}
+		self.printf("SERVICE_NAME            : %s\n", name)
+		self.println("SERVICE_FAILURE_ACTIONS :")
+		self.printf("Command: %s\n", command)
+		self.printf("Reboot Msg: %s\n", rebootMsg)
+		self.printf("Reset Period: %ds\n", result.ResetPeriod)
+		for i, action := range result.Actions {
+			self.printf("Action %d: Type: %s, Delay: %dms\n", i, msscmr.ScFailureActionMap[action.Type], action.Delay)
+		}
+	case uint64(msscmr.ServiceConfigDelayed_auto_start_info):
+		result, err := rpccon.GetServiceDelayedAutoStartInfo(name)
+		if err != nil {
+			self.println(err)
+			return
+		}
+		self.printf("SERVICE_NAME                   : %s\n", name)
+		self.printf("SERVICE_DELAYED_AUTOSTART_INFO : %v\n", result)
+	case uint64(msscmr.ServiceConfigFailure_actions_flag):
+		result, err := rpccon.GetServiceFailureActionsFlag(name)
+		if err != nil {
+			self.println(err)
+			return
+		}
+		self.printf("SERVICE_NAME                 : %s\n", name)
+		self.printf("SERVICE_FAILURE_ACTIONS_FLAG : %v\n", result)
+	case uint64(msscmr.ServiceConfigService_sid_info):
+		result, err := rpccon.GetServiceSIDInfo(name)
+		if err != nil {
+			self.println(err)
+			return
+		}
+		self.printf("SERVICE_NAME     : %s\n", name)
+		self.printf("SERVICE_SID_INFO : %d\n", result)
+	case uint64(msscmr.ServiceConfigRequired_privileges_info):
+		result, err := rpccon.GetServiceRequiredPrivileges(name)
+		if err != nil {
+			self.println(err)
+			return
+		}
+		self.printf("SERVICE_NAME                : %s\n", name)
+		self.println("SERVICE_REQUIRED_PRIVILEGES :")
+		for i, priv := range result {
+			self.printf("Privilege %d: %s\n", i, priv)
+		}
+	case uint64(msscmr.ServiceConfigPreshutdown_info):
+		result, err := rpccon.GetServicePreshutdownInfo(name)
+		if err != nil {
+			self.println(err)
+			return
+		}
+		self.printf("SERVICE_NAME             : %s\n", name)
+		self.printf("SERVICE_PRESHUTDOWN_INFO : %d\n", result)
+	case uint64(msscmr.ServiceConfigPreferred_node):
+		result, err := rpccon.GetServicePreferredNode(name)
+		if err != nil {
+			self.println(err)
+			return
+		}
+		self.printf("SERVICE_NAME           : %s\n", name)
+		self.printf("SERVICE_PREFERRED_NODE : preferred_node: %d, delete: %v\n", result.PreferredNode, result.Delete)
+	default:
+		self.printf("Invalid info-level for %s: %d\n", ScmrGetSvcConfig2, infoLevel)
+	}
+}
+
+func scmrGetServiceSecurityFunc(self *shell, argArr interface{}) {
+	if !self.authenticated {
+		self.println("Not logged in!")
+		return
+	}
+	usage := "Usage: " + usageMap[ScmrGetSvcSecurity]
+	args := argArr.([]string)
+	if len(args) < 1 {
+		self.println(usage)
+		return
+	}
+	name := args[0]
+	includeSacl := false
+	if len(args) > 1 && strings.EqualFold(args[1], "sacl") {
+		includeSacl = true
+	}
+	rpccon, err := self.getScmrHandle()
+	if err != nil {
+		self.println(err)
+		return
+	}
+	var rpcconLsat *mslsad.RPCCon
+	if self.resolveSids {
+		rpcconLsat, err = self.getLsadHandle()
+		if err != nil {
+			self.println(err)
+			return
+		}
+	}
+	var sd *msdtyp.SecurityDescriptor
+	var names []string
+	sd, names, err = getServiceSecurity(rpccon, rpcconLsat, name, includeSacl, self.resolveSids)
+	if err != nil {
+		self.println(err)
+		return
+	}
+	self.printf("Security information for %s\n", scmrSecurityLabel(name))
+	if sd == nil {
+		self.println("No security descriptor returned")
+		return
+	}
+	var sb strings.Builder
+	appendSecurityDescriptor(&sb, sd, names, self.resolveSids, scmrObjectRights(name))
+	self.println(sb.String())
 }

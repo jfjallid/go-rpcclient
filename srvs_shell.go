@@ -38,6 +38,9 @@ import (
 const (
 	SrvsEnumSessions    = "srvsenumsessions"
 	SrvsEnumShares      = "srvsenumshares"
+	SrvsGetShareInfo    = "srvsgetshareinfo"
+	SrvsSetShareInfo    = "srvssetshareinfo"
+	SrvsEnumDisks       = "srvsenumdisks"
 	SrvsGetInfo         = "srvsgetinfo"
 	SrvsGetFileSecurity = "srvsgetfilesecurity"
 )
@@ -45,25 +48,34 @@ const (
 var srvsUsageKeys = []string{
 	SrvsEnumSessions,
 	SrvsEnumShares,
+	SrvsGetShareInfo,
+	SrvsSetShareInfo,
+	SrvsEnumDisks,
 	SrvsGetInfo,
 	SrvsGetFileSecurity,
 }
 var srvsUsageMap = map[string]string{
 	SrvsEnumSessions:    SrvsEnumSessions + " [level]",
-	SrvsEnumShares:      SrvsEnumShares,
+	SrvsEnumShares:      SrvsEnumShares + " [level]",
+	SrvsGetShareInfo:    SrvsGetShareInfo + " <share> [level]",
+	SrvsSetShareInfo:    SrvsSetShareInfo + " <share> <field> <value>",
+	SrvsEnumDisks:       SrvsEnumDisks,
 	SrvsGetInfo:         SrvsGetInfo + " [level]",
-	SrvsGetFileSecurity: SrvsGetFileSecurity + " <share> <path>",
+	SrvsGetFileSecurity: SrvsGetFileSecurity + " <share> [path]",
 }
 
 var srvsDescriptionMap = map[string]string{
 	SrvsEnumSessions:    "List network sessions (supported levels 0, 10, 502. Default 10)",
-	SrvsEnumShares:      "List SMB Shares",
+	SrvsEnumShares:      "List SMB Shares (supported levels 1, 501, 502. Default 1)",
+	SrvsGetShareInfo:    "Get info for a single share (supported levels 0, 1, 2, 501, 502. Default 2)",
+	SrvsSetShareInfo:    "Modify a share. <field> is 'comment' or 'flags'",
+	SrvsEnumDisks:       "List disk drives on the server",
 	SrvsGetInfo:         "Get Server info (supported levels 100,101,102. Default 101. 102 requires admin privileges)",
 	SrvsGetFileSecurity: "Get security descriptor for file/folder on specified share",
 }
 
 func printSrvsHelp(self *shell) {
-	self.showCustomHelpFunc(34, "MS-SRVS", srvsUsageKeys)
+	self.showCustomHelpFunc(40, "MS-SRVS", srvsUsageKeys)
 }
 
 func init() {
@@ -74,6 +86,9 @@ func init() {
 	handlers[SrvsGetInfo] = getServerInfoFunc
 	handlers[SrvsEnumSessions] = getNetSessionsFunc
 	handlers[SrvsEnumShares] = listSharesFunc
+	handlers[SrvsGetShareInfo] = getShareInfoFunc
+	handlers[SrvsSetShareInfo] = setShareInfoFunc
+	handlers[SrvsEnumDisks] = enumDisksFunc
 	handlers[SrvsGetFileSecurity] = getFileSecurityFunc
 	helpFunctions[1] = printSrvsHelp
 }
@@ -111,7 +126,149 @@ func (self *shell) getSrvsHandle() (rpccon *mssrvs.RPCCon, err error) {
 	return
 }
 
-func listSharesFunc(self *shell, args interface{}) {
+func listSharesFunc(self *shell, argArr interface{}) {
+	if !self.authenticated {
+		self.println("Not logged in!")
+		return
+	}
+	usage := "Usage: " + usageMap[SrvsEnumShares]
+	args := argArr.([]string)
+	level := 1
+	if len(args) > 0 {
+		val, err := strconv.ParseInt(args[0], 10, 32)
+		if err != nil {
+			self.println("Error parsing level")
+			self.println(usage)
+			return
+		} else if (val != 1) && (val != 501) && (val != 502) {
+			self.println("Must specify a valid level (1, 501 or 502)")
+			self.println(usage)
+			return
+		}
+		level = int(val)
+	}
+
+	rpccon, err := self.getSrvsHandle()
+	if err != nil {
+		self.println(err)
+		return
+	}
+	var rpcconLsat *mslsad.RPCCon
+	if self.resolveSids {
+		rpcconLsat, err = self.getLsadHandle()
+		if err != nil {
+			self.println(err)
+			return
+		}
+	}
+
+	lines, err := getSharesFormatted(rpccon, rpcconLsat, "", level, self.resolveSids)
+	if err != nil {
+		self.println(err)
+		return
+	}
+	for _, item := range lines {
+		self.println(item)
+	}
+}
+
+func getShareInfoFunc(self *shell, argArr interface{}) {
+	if !self.authenticated {
+		self.println("Not logged in!")
+		return
+	}
+	usage := "Usage: " + usageMap[SrvsGetShareInfo]
+	args := argArr.([]string)
+	if len(args) < 1 {
+		self.println(usage)
+		return
+	}
+	share := args[0]
+	level := 2
+	if len(args) > 1 {
+		val, err := strconv.ParseInt(args[1], 10, 32)
+		if err != nil {
+			self.println("Error parsing level")
+			self.println(usage)
+			return
+		}
+		switch val {
+		case 0, 1, 2, 501, 502:
+		default:
+			self.println("Must specify a valid level (0, 1, 2, 501 or 502)")
+			self.println(usage)
+			return
+		}
+		level = int(val)
+	}
+
+	rpccon, err := self.getSrvsHandle()
+	if err != nil {
+		self.println(err)
+		return
+	}
+	var rpcconLsat *mslsad.RPCCon
+	if self.resolveSids {
+		rpcconLsat, err = self.getLsadHandle()
+		if err != nil {
+			self.println(err)
+			return
+		}
+	}
+
+	out, err := getShareInfoFormatted(rpccon, rpcconLsat, "", share, level, self.resolveSids)
+	if err != nil {
+		self.println(err)
+		return
+	}
+	self.println(out)
+}
+
+func setShareInfoFunc(self *shell, argArr interface{}) {
+	if !self.authenticated {
+		self.println("Not logged in!")
+		return
+	}
+	usage := "Usage: " + usageMap[SrvsSetShareInfo]
+	args := argArr.([]string)
+	if len(args) < 3 {
+		self.println(usage)
+		return
+	}
+	share := args[0]
+	field := strings.ToLower(args[1])
+	value := strings.Join(args[2:], " ")
+
+	rpccon, err := self.getSrvsHandle()
+	if err != nil {
+		self.println(err)
+		return
+	}
+
+	switch field {
+	case "comment":
+		err = rpccon.NetShareSetInfoComment("", share, value)
+	case "flags":
+		val, perr := parseNumericArg(value, uint32(0))
+		if perr != nil {
+			self.printf("Failed to parse flags value: %s\n", perr)
+			self.println(usage)
+			return
+		}
+		err = rpccon.NetShareSetInfoFlags("", share, val.(uint32))
+	default:
+		self.printf("Unknown field %q. Supported fields: comment, flags\n", field)
+		self.println(usage)
+		return
+	}
+	if err != nil {
+		self.println(err)
+		return
+	}
+	self.printf("Successfully updated share %s\n", share)
+}
+
+func enumDisksFunc(self *shell, argArr interface{}) {
 	if !self.authenticated {
 		self.println("Not logged in!")
 		return
@@ -121,14 +278,14 @@ func listSharesFunc(self *shell, args interface{}) {
 		self.println(err)
 		return
 	}
-
-	shares, err := getShares(rpccon, "")
+	disks, err := rpccon.NetServerDiskEnum("")
 	if err != nil {
 		self.println(err)
 		return
 	}
-	for _, share := range shares {
-		self.println(share)
+	self.println("Server disks:")
+	for _, d := range disks {
+		self.println(d)
 	}
 }
 
@@ -219,21 +376,14 @@ func getFileSecurityFunc(self *shell, argArr interface{}) {
 	}
 	usage := "Usage: " + usageMap[SrvsGetFileSecurity]
 	args := argArr.([]string)
-	share := ""
-	path := ""
-
-	if len(args) < 2 {
+	if len(args) < 1 {
 		self.println(usage)
 		return
-	} else {
-		share = args[0]
-		path = strings.Join(args[1:], " ")
 	}
-	//TODO Maybe do some basic validation on the arguments?
-	if strings.Contains(path, ":") {
-		// Remove drive prefix
-		path = strings.SplitN(path, ":", 2)[1]
-	}
+	share := args[0]
+	// An omitted path (or "\", "/", "") resolves to the share root. MS-SRVS
+	// expects a backslash-rooted path, so the root is "\".
+	queryPath := "\\" + normalizeSharePath(strings.Join(args[1:], " "))
 
 	rpccon, err := self.getSrvsHandle()
 	if err != nil {
@@ -248,62 +398,18 @@ func getFileSecurityFunc(self *shell, argArr interface{}) {
 			return
 		}
 	}
-	sd, names, err := getFileSecurity(rpccon, rpcconLsat, share, path, self.resolveSids)
+	sd, names, err := getFileSecurity(rpccon, rpcconLsat, share, queryPath, self.resolveSids)
 	if err != nil {
 		self.println(err)
 		return
 	}
 
-	self.printf("Security information for share: %s, file: %s\n", share, path)
+	self.printf("Security information for share: %s, file: %s\n", share, queryPath)
+	if sd == nil {
+		self.println("No security descriptor returned")
+		return
+	}
 	var sb strings.Builder
-	if sd.OwnerSid != nil {
-		fmt.Fprintf(&sb, "OwnerSid: %s", sd.OwnerSid.ToString())
-		if self.resolveSids && len(names) > 0 {
-			fmt.Fprintf(&sb, "(%s)", names[0])
-		}
-		sb.WriteRune('\n')
-		names = names[1:]
-	}
-	if sd.GroupSid != nil {
-		fmt.Fprintf(&sb, "GroupSid: %s", sd.GroupSid.ToString())
-		if self.resolveSids && len(names) > 0 {
-			fmt.Fprintf(&sb, "(%s)", names[0])
-		}
-		sb.WriteRune('\n')
-		names = names[1:]
-	}
-	if sd.Dacl != nil {
-		fmt.Fprintln(&sb, "DACL entries:")
-		daclPermissions := sd.Dacl.Permissions()
-		for _, item := range daclPermissions.Entries {
-			fmt.Fprintf(&sb, "AceType: %s\nAceFlags: %s\nSid: %s\n", item.AceType, item.AceFlagStrings, item.Sid)
-			if self.resolveSids && len(names) > 0 {
-				fmt.Fprintf(&sb, "Name: %s\n", names[0])
-				names = names[1:]
-			}
-			fmt.Fprintf(&sb, "Permissions: ")
-			permissions := ""
-			for _, perm := range item.Permissions {
-				permissions = fmt.Sprintf("%s,%s", permissions, perm)
-			}
-			sb.WriteString(strings.TrimPrefix(permissions, ","))
-			sb.WriteString("\n")
-		}
-	}
-	if sd.Sacl != nil {
-		fmt.Fprintln(&sb, "SACL entries:")
-		saclPermissions := sd.Sacl.Permissions()
-		for _, item := range saclPermissions.Entries {
-			fmt.Fprintf(&sb, "AceType: %s\nAceFlags: %s\nSid: %s\n", item.AceType, item.AceFlagStrings, item.Sid)
-			fmt.Fprintf(&sb, "Permissions: ")
-			permissions := ""
-			for _, perm := range item.Permissions {
-				permissions = fmt.Sprintf("%s,%s", permissions, perm)
-			}
-			sb.WriteString(strings.TrimPrefix(permissions, ","))
-			sb.WriteString("\n")
-		}
-	}
+	appendSecurityDescriptor(&sb, sd, names, self.resolveSids, nil)
 	self.println(sb.String())
-
 }

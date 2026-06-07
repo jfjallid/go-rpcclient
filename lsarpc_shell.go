@@ -41,6 +41,7 @@ const (
 	LsadDelRights     = "lsadelrights"
 	LsadGetDominfo    = "lsagetdominfo"
 	LsadPurgeRights   = "lsapurgerights"
+	LsadCreateAccount = "lsacreateaccount"
 	LsatLookupNames   = "lsalookupnames"
 	LsatLookupSids    = "lsalookupsids"
 	LsatGetUserName   = "lsagetusername"
@@ -53,6 +54,7 @@ var lsadUsageKeys = []string{
 	LsadDelRights,
 	LsadGetDominfo,
 	LsadPurgeRights,
+	LsadCreateAccount,
 	LsatLookupNames,
 	LsatLookupSids,
 	LsatGetUserName,
@@ -64,6 +66,7 @@ var lsadUsageMap = map[string]string{
 	LsadDelRights:     LsadDelRights + " <SID> <rights...>",
 	LsadGetDominfo:    LsadGetDominfo,
 	LsadPurgeRights:   LsadPurgeRights + " <SID>",
+	LsadCreateAccount: LsadCreateAccount + " <SID>",
 	LsatLookupNames:   LsatLookupNames + " <name [name name ...]",
 	LsatLookupSids:    LsatLookupSids + " <SID [SID SID ...]>",
 	LsatGetUserName:   LsatGetUserName,
@@ -76,6 +79,7 @@ var lsadDescriptionMap = map[string]string{
 	LsadDelRights:     "Remove list of LSA rights from account specified by SID",
 	LsadGetDominfo:    "Get primary domain name and domain SID",
 	LsadPurgeRights:   "Removes all LSA rights for the specified SID",
+	LsadCreateAccount: "Create an LSA account for the specified SID",
 	LsatLookupNames:   "Attempts to translate the sids specified by --names to sids",
 	LsatLookupSids:    "Attempts to translate the sids specified by --sids to names",
 	LsatGetUserName:   "Get the identity of the authenticated user",
@@ -95,6 +99,7 @@ func init() {
 	handlers[LsadAddRights] = addLSAAccountRights
 	handlers[LsadDelRights] = removeLSAAccountRights
 	handlers[LsadPurgeRights] = purgeLSAAccountRights
+	handlers[LsadCreateAccount] = createLSAAccount
 	handlers[LsadGetDominfo] = getLSAPrimaryDomainInfo
 	handlers[LsatLookupNames] = lsaLookupNames
 	handlers[LsatLookupSids] = lsaLookupSids
@@ -179,7 +184,7 @@ func getLSAAccount(self *shell, argArr interface{}) {
 	}
 	var sb strings.Builder
 	for i, sid := range accounts {
-		sb.WriteString(sid)
+		fmt.Fprintf(&sb, "Account SID: %s", sid)
 		if len(names) > 0 {
 			fmt.Fprintf(&sb, " (%s)", names[i])
 		}
@@ -351,7 +356,7 @@ func purgeLSAAccountRights(self *shell, argArr interface{}) {
 		self.println(err)
 		return
 	}
-	self.println("all rights removed!")
+	self.println("Rights removed!")
 }
 
 func getLSAPrimaryDomainInfo(self *shell, argArr interface{}) {
@@ -371,7 +376,7 @@ func getLSAPrimaryDomainInfo(self *shell, argArr interface{}) {
 		self.println(err)
 		return
 	}
-	self.printf("Domain: %s, SID: %s\n", domInfo.Name, domInfo.Sid.ToString())
+	self.printf("Domain: %s, SID: %s\n", domInfo.Name.String(), domInfo.Sid.ToString())
 }
 
 func getLSAUserName(self *shell, argArr interface{}) {
@@ -491,4 +496,46 @@ func lsaLookupNames(self *shell, argArr interface{}) {
 		}
 		self.printf("Name: %s\nSidType: %s\nSid: %s\nDomain: %s\nDomainSid: %s\n\n", names[i], mslsad.SidNameUseMap[item.Use], item.Sid, referencedDomain, domainSid)
 	}
+}
+
+func createLSAAccount(self *shell, argArr interface{}) {
+	if !self.authenticated {
+		self.println("Not logged in!")
+		return
+	}
+	usage := "Usage: " + usageMap[LsadCreateAccount]
+
+	args := argArr.([]string)
+	if len(args) < 1 {
+		self.println(usage)
+		return
+	}
+	sid, err := msdtyp.ConvertStrToSID(args[0])
+	if err != nil {
+		self.println("Error parsing SID")
+		self.println(usage)
+		return
+	}
+	sidStr := sid.ToString()
+
+	rpccon, err := self.getLsadHandle()
+	if err != nil {
+		self.println(err)
+		return
+	}
+
+	policyHandle, err := rpccon.LsarOpenPolicy2("")
+	if err != nil {
+		self.println(err)
+		return
+	}
+	defer rpccon.LsarCloseHandle(policyHandle)
+
+	accountHandle, err := rpccon.LsarCreateAccount(policyHandle, sidStr, 0)
+	if err != nil {
+		self.println(err)
+		return
+	}
+	rpccon.LsarCloseHandle(accountHandle)
+	self.println("Account created!")
 }

@@ -31,7 +31,7 @@ import (
 )
 
 var helpWkstOptions = `
-    Usage: ` + os.Args[0] + ` --wkst [options] <action>
+    Usage: ` + os.Args[0] + ` wkst [options] <action>
     ` + helpConnectionOptions + `
     Action:
           --enum-sessions      List logged in users (Required admin privileges) (default level: 1)
@@ -41,7 +41,7 @@ var helpWkstOptions = `
 `
 
 func getWkstSessions(rpccon *mswkst.RPCCon, level int) (sessions []string, err error) {
-	var res mswkst.WkstaUserEnumUnion
+	var res *mswkst.WkstaUserEnum
 	res, err = rpccon.EnumWkstLoggedOnUsers(level)
 	if err != nil {
 		log.Errorln(err)
@@ -50,12 +50,12 @@ func getWkstSessions(rpccon *mswkst.RPCCon, level int) (sessions []string, err e
 
 	switch level {
 	case 0:
-		info := res.(*mswkst.WkstaUserInfo0Container)
+		info := res.Level0
 		for i := 0; i < int(info.EntriesRead); i++ {
 			sessions = append(sessions, fmt.Sprintf("Username: %s\n", info.Buffer[i].Username))
 		}
 	case 1:
-		info := res.(*mswkst.WkstaUserInfo1Container)
+		info := res.Level1
 		for i := 0; i < int(info.EntriesRead); i++ {
 			sessions = append(sessions, fmt.Sprintf("Username: %s, LogonDomain: %s, OtherDomains: %s, LogonServer: %s\n", info.Buffer[i].Username, info.Buffer[i].LogonDomain, info.Buffer[i].OtherDomains, info.Buffer[i].LogonServer))
 		}
@@ -63,8 +63,13 @@ func getWkstSessions(rpccon *mswkst.RPCCon, level int) (sessions []string, err e
 	return
 }
 
+func validateWkstActions(args *userArgs) error {
+	return exactlyOneAction(
+		args.enumSessions,
+	)
+}
+
 func handleWkst(args *userArgs) (err error) {
-	numActions := 0
 	if args.enumSessions {
 		if !isFlagSet("level") {
 			args.level = 1
@@ -74,18 +79,16 @@ func handleWkst(args *userArgs) (err error) {
 				return
 			}
 		}
-		numActions++
-	}
-	if numActions != 1 {
-		fmt.Println("Must specify ONE action. No more, no less")
-		flags.Usage()
-		return
 	}
 
 	// Make the connection!
 	err = makeConnection(&args.connArgs)
 	if err != nil {
 		log.Errorln(err)
+		return
+	}
+	if args.opts == nil || args.opts.c == nil {
+		err = fmt.Errorf("failed to establish connection to server")
 		return
 	}
 	conn := args.opts.c

@@ -43,8 +43,14 @@ General options:
       --socks-port <port>    SOCKS5 proxy port (default 1080)
       --noenc                Disable smb encryption
       --smb2                 Force smb 2.1
-      --debug                Enable debug logging
-      --verbose              Enable verbose logging
+      --debug                Enable debug logging. Bare --debug turns on every registered package;
+                               --debug=smb,relay,dcerpc/server turns on only the listed package-name suffixes
+                               (the '=' form is required for the filter).
+      --verbose              Enable verbose logging. Same filter syntax as --debug.
+                               --debug and --verbose may be combined with different filters;
+                               a package targeted by both gets the higher level.
+      --list-log-packages    List the registered log package names that can be targeted
+                               with --debug=<suffix> or --verbose=<suffix>, then exit
       --resolve-sids         Attempt to translate SIDs using MS-LSAT
   -v, --version              Show version
 ```

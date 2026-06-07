@@ -638,10 +638,10 @@ func closeAllBinds(self *shell) error {
 	for _, fn := range cleanupCallbacks {
 		fn(self)
 	}
-	for i, _ := range self.binds {
+	for i := range self.binds {
 		delete(self.binds, i)
 	}
-	for i, _ := range self.files {
+	for i := range self.files {
 		self.files[i].CloseFile()
 	}
 	self.files = []*smb.File{}
@@ -739,14 +739,12 @@ func (self *shell) cmdloop() {
 		}
 	}
 
-	// Disable logging from smb library as it interferes with the terminal emulation output
-	golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
-	golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
-	golog.Set("github.com/jfjallid/go-smb/msdtyp", "msdtyp", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
-	golog.Set("github.com/jfjallid/go-smb/dcerpc", "dcerpc", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
-	golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
-	golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
-	log.SetLogLevel(golog.LevelNone)
+	// Disable logging as it interferes with the terminal emulation output.
+	// golog.Names() enumerates every registered package logger, including our
+	// own "main" logger, which we also silence in interactive mode.
+	for _, name := range golog.Names() {
+		golog.Set(name, "", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
+	}
 
 	defer self.options.c.TreeDisconnect(self.share)
 	defer closeAllBinds(self)

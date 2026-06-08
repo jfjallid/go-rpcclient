@@ -43,11 +43,12 @@ import (
 	"github.com/jfjallid/go-smb/relay"
 	"github.com/jfjallid/go-smb/smb"
 	"github.com/jfjallid/go-smb/spnego"
+	"github.com/jfjallid/gokrb5/v9/keytab"
 	"github.com/jfjallid/golog"
 )
 
 var log = golog.Get("main")
-var release string = "0.4.0"
+var release string = "0.4.1"
 var flags *flag.FlagSet
 
 var helpMsg = `
@@ -79,6 +80,8 @@ var helpConnectionOptions = `
           --dc-ip     <ip>       Optionally specify ip of KDC when using Kerberos authentication
           --target-ip <ip>       Optionally specify ip of target when using Kerberos authentication
           --aes-key   <hex>      Use a hex encoded AES128/256 key for Kerberos authentication
+          --keytab-file <file>   Authenticate using keys from a keytab file (implies -k). User and
+                                 domain are taken from the first keytab entry if not specified
           --dns-host <ip[:port]> Override system's default DNS resolver
           --dns-tcp              Force DNS lookups over TCP. Default true when using --socks-host
       -t, --timeout <duration>   Dial timeout specified in 5s, 1m, 10m format (default 5s)
@@ -363,6 +366,7 @@ type connArgs struct {
 	targetIP    string
 	dcIP        string
 	aesKey      string
+	keytabFile  string
 	dnsHost     string
 	port        int
 	dialTimeout time.Duration
@@ -552,6 +556,7 @@ func addConnectionArgs(flagSet *flag.FlagSet, argv *userArgs) {
 	flagSet.StringVar(&argv.targetIP, "target-ip", "", "")
 	flagSet.StringVar(&argv.dcIP, "dc-ip", "", "")
 	flagSet.StringVar(&argv.aesKey, "aes-key", "", "")
+	flagSet.StringVar(&argv.keytabFile, "keytab-file", "", "")
 	flagSet.StringVar(&argv.dnsHost, "dns-host", "", "")
 	flagSet.BoolVar(&argv.dnsTCP, "dns-tcp", false, "")
 	flagSet.BoolVar(&argv.resolveSids, "resolve-sids", false, "")
@@ -892,12 +897,19 @@ func makeConnection(args *connArgs) (err error) {
 		}
 	}
 
+	// A keytab is a Kerberos credential, so authenticating with one implies -k.
+	if args.keytabFile != "" {
+		args.kerberos = true
+	}
+
 	if args.noPass {
 		args.password = ""
 		hashBytes = nil
 		aesKeyBytes = nil
 	} else {
-		if (args.password == "") && (hashBytes == nil) && (aesKeyBytes == nil) {
+		// A keytab is a valid credential source, so don't prompt for a password
+		// when one is supplied.
+		if (args.password == "") && (hashBytes == nil) && (aesKeyBytes == nil) && (args.keytabFile == "") {
 			if (args.username != "") && (!args.nullSession) {
 				// Check if password is already specified to be empty
 				if !isFlagSet("P") && !isFlagSet("pass") {
@@ -957,7 +969,7 @@ func makeConnection(args *connArgs) (err error) {
 	}
 
 	if args.kerberos {
-		smbOptions.Initiator = &spnego.KRB5Initiator{
+		krbInitiator := &spnego.KRB5Initiator{
 			User:        args.username,
 			Password:    args.password,
 			Domain:      args.domain,
@@ -971,6 +983,18 @@ func makeConnection(args *connArgs) (err error) {
 			DnsTCP:      args.dnsTCP,
 			Host:        args.host,
 		}
+		if args.keytabFile != "" {
+			// The initiator authenticates from the keytab and derives a missing
+			// User/Domain from its first entry.
+			kt, kerr := keytab.Load(args.keytabFile)
+			if kerr != nil {
+				log.Errorf("Failed to load keytab file %s: %s\n", args.keytabFile, kerr)
+				return
+			}
+			krbInitiator.Keytab = kt
+		}
+		smbOptions.Initiator = krbInitiator
+
 	} else {
 		smbOptions.Initiator = &spnego.NTLMInitiator{
 			User:        args.username,

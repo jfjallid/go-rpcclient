@@ -22,6 +22,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -114,7 +115,7 @@ func (self *shell) getLsadHandle() (rpccon *mslsad.RPCCon, err error) {
 		var f *smb.File
 		f, err = self.options.c.OpenFile(self.share, mslsad.MSRPCLsaRpcPipe)
 		if err != nil {
-			if err == smb.StatusMap[smb.StatusObjectNameNotFound] {
+			if errors.Is(err, smb.StatusMap[smb.StatusObjectNameNotFound]) {
 				err = fmt.Errorf("Named pipe not available. Is the service running?")
 			}
 			return

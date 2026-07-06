@@ -48,7 +48,7 @@ import (
 )
 
 var log = golog.Get("main")
-var release string = "0.4.1"
+var release string = "0.4.2"
 var flags *flag.FlagSet
 
 var helpMsg = `

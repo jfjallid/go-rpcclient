@@ -22,6 +22,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"strconv"
@@ -67,7 +68,7 @@ func (self *shell) getWkstHandle() (rpccon *mswkst.RPCCon, err error) {
 		var f *smb.File
 		f, err = self.options.c.OpenFile(self.share, mswkst.MSRPCWksSvcPipe)
 		if err != nil {
-			if err == smb.StatusMap[smb.StatusObjectNameNotFound] {
+			if errors.Is(err, smb.StatusMap[smb.StatusObjectNameNotFound]) {
 				err = fmt.Errorf("Named pipe not available. Is the service running?")
 			}
 			return

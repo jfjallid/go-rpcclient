@@ -22,6 +22,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"strconv"
@@ -126,7 +127,7 @@ func (self *shell) getScmrHandle() (rpccon *msscmr.RPCCon, err error) {
 		var f *smb.File
 		f, err = self.options.c.OpenFile(self.share, msscmr.MSRPCSvcCtlPipe)
 		if err != nil {
-			if err == smb.StatusMap[smb.StatusObjectNameNotFound] {
+			if errors.Is(err, smb.StatusMap[smb.StatusObjectNameNotFound]) {
 				err = fmt.Errorf("Named pipe not available. Is the service running?")
 			}
 			return
